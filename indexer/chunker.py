@@ -119,6 +119,20 @@ def collect_comments(root: Node) -> List[Node]:
             stack.append(cur.named_child(i))
     return out
 
+def match_captures(match):
+    """
+    Normalize tree-sitter Query.matches item to a list of (node, name) pairs.
+    - Some bindings return an object with .captures
+    - Others return a tuple: (pattern_index, captures)
+    """
+    caps = getattr(match, "captures", None)
+    if caps is not None:
+        return caps
+    if isinstance(match, tuple) and len(match) >= 2:
+        return match[1]
+    return []
+
+
 def preceding_doc(n: Node, src: bytes, comments: List[Node]) -> Optional[str]:
     # take comments ending within COMMENT_GAP lines before node.start_point
     start_line = n.start_point[0]
@@ -156,7 +170,15 @@ def chunk_file(repo_root: pathlib.Path, file_path: pathlib.Path) -> List[dict]:
 
     # Use matches to get container nodes where possible; otherwise fall back to captures
     for match in query.matches(tree.root_node):
-        caps = {name: node for node, name in match.captures}
+        pairs = match_captures(match)  # match two returns
+        if not pairs:
+            continue
+        caps = {}
+        for node, name in pairs:
+        # Just focuse on things we care
+            if name in {"function","class","method","export_fn","export_class",
+                    "arrow_var","fn_name","class_name","method_name","var_name"}:
+                caps[name] = node
 
         # function
         if "function" in caps and "fn_name" in caps:
