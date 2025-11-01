@@ -1,17 +1,19 @@
+# indexer/ast_dump.py 修正版
 import argparse, json, sys, pathlib
 from typing import Iterable
-from tree_sitter import Parser, Query
+from tree_sitter import Parser
 from tree_sitter_languages import get_language
 
 EXT2LANG = {
     ".js": "javascript",
-    ".jsx": "javascript",
+    ".jsx": "javascript", 
     ".ts": "typescript",
     ".tsx": "tsx",
 }
 JS_LIKE = set(EXT2LANG.keys())
 
-QUERY_SRC = b"""
+# 注意：这里用字符串而不是bytes
+QUERY_SRC = """
 (function_declaration name: (identifier) @name) @fn
 (class_declaration name: (identifier) @name) @class
 (method_definition name: (property_identifier) @name) @method
@@ -25,13 +27,13 @@ def iter_files(root: pathlib.Path):
         if p.is_file() and p.suffix.lower() in JS_LIKE:
             yield p
 
-def emit(fh, file_rel, kind, name_node, container_node):
+def emit(fh, file_rel, kind, name_text, start_line, end_line):
     fh.write(json.dumps({
         "file": file_rel,
         "type": kind,
-        "name": name_node.text.decode("utf-8", "ignore"),
-        "start": container_node.start_point[0] + 1,
-        "end": container_node.end_point[0] + 1,
+        "name": name_text,
+        "start": start_line,
+        "end": end_line,
     }, ensure_ascii=False) + "\n")
 
 def main():
@@ -46,39 +48,59 @@ def main():
 
     with outp.open("w", encoding="utf-8") as fh:
         for file in iter_files(repo):
-            lang_name = EXT2LANG[file.suffix.lower()]
-            lang = get_language(lang_name)
-            parser = Parser()
-            parser.set_language(lang)
-
-            src = file.read_bytes()
-            tree = parser.parse(src)
-            query = Query(lang, QUERY_SRC)
-
-            # 优先 matches（可取容器结点）
             try:
-                for m in query.matches(tree.root_node):
-                    caps = {name: node for node, name in m.captures}
-                    file_rel = str(file.relative_to(repo))
-                    if "name" in caps:
-                        container = caps.get("fn") or caps.get("class") or caps.get("method") \
-                                   or caps.get("export_fn") or caps.get("export_class")
-                        kind = container.type if container else caps["name"].parent.type
-                        emit(fh, file_rel, kind, caps["name"], container or caps["name"].parent)
-                    elif "var_name" in caps and "arrow_var" in caps:
-                        emit(fh, file_rel, "arrow_function", caps["var_name"], caps["arrow_var"])
-            except Exception:
-                # 兜底：captures 也打一次，保证 Day-1 可用
-                for node, cap in query.captures(tree.root_node):
-                    if cap == "name":
-                        container = node.parent
-                        emit(fh, str(file.relative_to(repo)), container.type, node, container)
-
-    print(f"Wrote ->", outp)
+                # 简化处理：所有JS-like文件都用javascript parser
+                # （Day 1够用，Day 2再区分typescript）
+                lang = get_language("javascript")
+                parser = Parser()
+                parser.set_language(lang)
+                
+                src = file.read_bytes()
+                tree = parser.parse(src)
+                
+                # 使用 language.query() 方法而不是 Query 类
+                query = lang.query(QUERY_SRC)
+                
+                file_rel = str(file.relative_to(repo))
+                
+                # 使用captures方法（更稳定）
+                captures = query.captures(tree.root_node)
+                
+                seen = set()  # 去重
+                for node, capture_name in captures:
+                    if capture_name == "name":
+                        parent = node.parent
+                        name_text = node.text.decode("utf-8", "ignore")
+                        start = parent.start_point[0] + 1
+                        end = parent.end_point[0] + 1
+                        
+                        # 简单去重
+                        key = (file_rel, name_text, start)
+                        if key not in seen:
+                            seen.add(key)
+                            emit(fh, file_rel, parent.type, name_text, start, end)
+                    
+                    elif capture_name == "var_name":
+                        # 处理箭头函数
+                        name_text = node.text.decode("utf-8", "ignore")
+                        parent = node.parent
+                        start = parent.start_point[0] + 1
+                        end = parent.end_point[0] + 1
+                        
+                        key = (file_rel, name_text, start)
+                        if key not in seen:
+                            seen.add(key)
+                            emit(fh, file_rel, "arrow_function", name_text, start, end)
+                            
+            except Exception as e:
+                print(f"Warning: Failed to parse {file}: {e}", file=sys.stderr)
+                continue
+    
+    print(f"Wrote -> {outp}")
 
 if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        print(f"[AST] Error:", e, file=sys.stderr)
+        print(f"[AST] Error: {e}", file=sys.stderr)
         sys.exit(1)
