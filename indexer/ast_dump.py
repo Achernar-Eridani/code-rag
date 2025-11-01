@@ -50,7 +50,6 @@ def main():
         for file in iter_files(repo):
             try:
                 # 简化处理：所有JS-like文件都用javascript parser
-                # （Day 1够用，Day 2再区分typescript）
                 lang = get_language("javascript")
                 parser = Parser()
                 parser.set_language(lang)
