@@ -1,30 +1,39 @@
 # indexer/chunker.py
 """
-Day 2: AST-aware chunking v1 (stable schema)
+Day 2: AST-aware chunking v1 (stable schema, wide JS coverage)
 - Query backend: language.query()  (str -> bytes fallback)
-- Output schema (stable):
-  { "id": str, "text": str, "meta": { ... } }
+- Output schema (stable): { "id": str, "text": str, "meta": { ... } }
+- Coverage:
+  * function_declaration
+  * class_declaration / method_definition
+  * variable_declarator -> (arrow_function | function | function_expression)
+  * assignment_expression -> (identifier | member_expression) = (arrow | function | function_expression)
 """
 from __future__ import annotations
 import argparse, json, os, pathlib, hashlib
-from typing import List, Tuple, Optional
+from typing import List, Optional
 from tree_sitter import Parser, Node
 from tree_sitter_languages import get_language
 
-# ---- config (env-driven, no extra deps) ----
-CHUNK_MAX_LINES = int(os.getenv("CHUNK_MAX_LINES", "200"))    # hard cap per chunk
-DOC_MAX_LINES   = int(os.getenv("DOC_MAX_LINES", "20"))       # max doc lines
-COMMENT_GAP     = int(os.getenv("COMMENT_GAP", "2"))          # max gap (lines) between comment and node start
+# ---- config (env) ----
+CHUNK_MAX_LINES = int(os.getenv("CHUNK_MAX_LINES", "200"))
+DOC_MAX_LINES   = int(os.getenv("DOC_MAX_LINES", "20"))
+COMMENT_GAP     = int(os.getenv("COMMENT_GAP", "2"))
 
-EXT2LANG = {".js":"javascript",".jsx":"javascript",".ts":"typescript",".tsx":"tsx"}
+EXT2LANG = {
+    ".js":"javascript",".jsx":"javascript",
+    ".ts":"typescript",".tsx":"tsx",
+    ".mjs":"javascript",".cjs":"javascript",
+}
 SUPPORTED_EXTS = set(EXT2LANG.keys())
 
-# Query patterns (cover function/class/method/arrow/export)
+
 QUERY_STR = r"""
-; comments (for proximity doc)
+; comments (for doc extraction)
 (comment) @comment
 
-(function_declaration name: (identifier) @fn_name) @function
+(function_declaration
+  name: (identifier) @fn_name) @function
 
 (class_declaration
   name: (identifier) @class_name
@@ -33,19 +42,46 @@ QUERY_STR = r"""
 (method_definition
   name: (property_identifier) @method_name) @method
 
+; const foo = () => {}
 (variable_declarator
   name: (identifier) @var_name
   value: (arrow_function) @arrow_body) @arrow_var
+
+; const foo = function (...) { ... }
+(variable_declarator
+  name: (identifier) @var_name2
+  value: (function) @fn_expr) @var_fn
+
+; foo = () => {}
+(assignment_expression
+  left: (identifier) @assign_name
+  right: (arrow_function) @assign_arrow) @assign_arrow_stmt
+
+; foo = function (...) { ... }
+(assignment_expression
+  left: (identifier) @assign_name2
+  right: (function) @assign_fn) @assign_fn_stmt
+
+; obj.prop = function (...) { ... }
+(assignment_expression
+  left: (member_expression
+          object: (_)
+          property: (property_identifier) @prop_name)
+  right: (function) @assign_prop_fn) @assign_prop_fn_stmt
 """
 
+
 def make_query(lang):
-    # Prefer str pattern; fallback to bytes for older bindings
     try:
         return lang.query(QUERY_STR)
-    except Exception:
-        return lang.query(QUERY_STR.encode("utf-8"))
+    except Exception as e1:
+        try:
+            return lang.query(QUERY_STR.encode("utf-8"))
+        except Exception as e2:
+            raise RuntimeError(f"Query compile failed for language={lang}: {e2 or e1}")
 
-# ---- small utils ----
+
+# ---- utils ----
 def repo_rel(root: pathlib.Path, p: pathlib.Path) -> str:
     return str(p.relative_to(root))
 
@@ -59,7 +95,6 @@ def limit_lines(text: str, max_lines: int) -> str:
     return "\n".join(lines[:max_lines])
 
 def is_exported(n: Node) -> bool:
-    # if any ancestor is export_statement
     cur = n
     while cur is not None:
         if cur.type == "export_statement":
@@ -78,7 +113,7 @@ def parent_class_name(n: Node, src: bytes) -> Optional[str]:
     return None
 
 def build_ast_path(n: Node, src: bytes) -> str:
-    parts: List[str] = []
+    parts = []
     cur = n
     while cur is not None:
         if cur.type == "function_declaration":
@@ -95,20 +130,17 @@ def build_ast_path(n: Node, src: bytes) -> str:
     return "/".join(parts)
 
 def extract_signature(n: Node, src: bytes) -> str:
-    # take from start until first '{' or '=>'
     raw = node_text(src, n)
     lines = raw.splitlines()
     sig_lines = []
-    stop = False
     for line in lines:
         sig_lines.append(line)
         if "=>" in line or "{" in line:
             break
     sig = " ".join(" ".join(sig_lines).split())
-    return sig[:200]  # keep concise
+    return sig[:200]
 
 def collect_comments(root: Node) -> List[Node]:
-    # lightweight DFS to collect comment nodes
     out: List[Node] = []
     stack = [root]
     while stack:
@@ -119,22 +151,7 @@ def collect_comments(root: Node) -> List[Node]:
             stack.append(cur.named_child(i))
     return out
 
-def match_captures(match):
-    """
-    Normalize tree-sitter Query.matches item to a list of (node, name) pairs.
-    - Some bindings return an object with .captures
-    - Others return a tuple: (pattern_index, captures)
-    """
-    caps = getattr(match, "captures", None)
-    if caps is not None:
-        return caps
-    if isinstance(match, tuple) and len(match) >= 2:
-        return match[1]
-    return []
-
-
 def preceding_doc(n: Node, src: bytes, comments: List[Node]) -> Optional[str]:
-    # take comments ending within COMMENT_GAP lines before node.start_point
     start_line = n.start_point[0]
     picked: List[str] = []
     for c in comments:
@@ -150,7 +167,46 @@ def stable_id(path: str, kind: str, name: str, start: int, end: int) -> str:
     h = hashlib.md5(f"{path}|{kind}|{name}|{start}|{end}".encode("utf-8")).hexdigest()
     return h[:12]
 
-# ---- core chunking ----
+def iter_match_captures(query, match):
+    """
+    Normalize to (node, name_str):
+    - match.captures OR (pattern_index, captures)
+    - capture item can be (node, name) / (name, node) / (node, index) / 3-tuples
+    """
+    caps = getattr(match, "captures", None)
+    if caps is None:
+        if isinstance(match, tuple) and len(match) >= 2:
+            caps = match[1]
+        else:
+            caps = []
+
+    for item in caps:
+        node = None
+        label = None
+        if isinstance(item, tuple):
+            a = item[0] if len(item) > 0 else None
+            b = item[1] if len(item) > 1 else None
+            if hasattr(a, "type"):
+                node, label = a, b
+            elif hasattr(b, "type"):
+                node, label = b, a
+            else:
+                continue
+        else:
+            continue
+
+        if isinstance(label, int):
+            try:
+                name = query.capture_names[label]
+            except Exception:
+                name = str(label)
+        else:
+            name = label if isinstance(label, str) else str(label)
+
+        if node is not None and isinstance(name, str):
+            yield node, name
+
+# ---- core ----
 def chunk_file(repo_root: pathlib.Path, file_path: pathlib.Path) -> List[dict]:
     if file_path.suffix.lower() not in SUPPORTED_EXTS:
         return []
@@ -166,42 +222,65 @@ def chunk_file(repo_root: pathlib.Path, file_path: pathlib.Path) -> List[dict]:
     comments = collect_comments(tree.root_node)
 
     chunks: List[dict] = []
-    seen_keys = set()  # dedupe by (name,start_line,kind)
+    seen_keys = set()
 
-    # Use matches to get container nodes where possible; otherwise fall back to captures
     for match in query.matches(tree.root_node):
-        pairs = match_captures(match)  # match two returns
-        if not pairs:
-            continue
         caps = {}
-        for node, name in pairs:
-        # Just focuse on things we care
-            if name in {"function","class","method","export_fn","export_class",
-                    "arrow_var","fn_name","class_name","method_name","var_name"}:
+        for node, name in iter_match_captures(query, match):
+            if name in {
+                "function","class","method","fn_name","class_name","method_name",
+                "arrow_var","var_name","arrow_body",
+                "var_fn","var_name2","fn_expr",
+                "assign_fn_stmt","assign_fn","assign_name2",
+                "assign_arrow_stmt","assign_arrow","assign_name",
+                "assign_prop_fn_stmt","assign_prop_fn","prop_name"
+            }:
                 caps[name] = node
 
-        # function
+        if not caps:
+            continue
+
+        # Normalize to (node, name, kind)
+        n = None; nm = None; kind = None
+
+        # function declaration
         if "function" in caps and "fn_name" in caps:
-            n = caps["function"]; name = node_text(src, caps["fn_name"])
-            kind = "function"
-        # class
+            n = caps["function"]; nm = node_text(src, caps["fn_name"]); kind = "function"
+
+        # class declaration
         elif "class" in caps and "class_name" in caps:
-            n = caps["class"]; name = node_text(src, caps["class_name"])
-            kind = "class"
-        # method
+            n = caps["class"]; nm = node_text(src, caps["class_name"]); kind = "class"
+
+        # method definition
         elif "method" in caps and "method_name" in caps:
-            n = caps["method"]; name = node_text(src, caps["method_name"])
-            kind = "method"
-        # arrow var
+            n = caps["method"]; nm = node_text(src, caps["method_name"]); kind = "method"
+
+        # const foo = () => {}
         elif "arrow_var" in caps and "var_name" in caps:
-            n = caps["arrow_var"]; name = node_text(src, caps["var_name"])
-            kind = "arrow_function"
+            n = caps["arrow_var"]; nm = node_text(src, caps["var_name"]); kind = "arrow_function"
+
+        # const foo = function (...) {}
+        elif "var_fn" in caps and "var_name2" in caps:
+            n = caps["var_fn"]; nm = node_text(src, caps["var_name2"]); kind = "function"
+
+        # foo = () => {}
+        elif "assign_arrow_stmt" in caps and "assign_name" in caps:
+            n = caps["assign_arrow_stmt"]; nm = node_text(src, caps["assign_name"]); kind = "arrow_function"
+
+        # foo = function (...) {}
+        elif "assign_fn_stmt" in caps and "assign_name2" in caps:
+            n = caps["assign_fn_stmt"]; nm = node_text(src, caps["assign_name2"]); kind = "function"
+
+        # obj.prop = function (...) {}
+        elif "assign_prop_fn_stmt" in caps and "prop_name" in caps:
+            n = caps["assign_prop_fn_stmt"]; nm = node_text(src, caps["prop_name"]); kind = "method"
+
         else:
             continue
 
         start = n.start_point[0] + 1
         end   = n.end_point[0] + 1
-        key = (name, start, kind)
+        key = (nm, start, kind)
         if key in seen_keys:
             continue
         seen_keys.add(key)
@@ -214,37 +293,30 @@ def chunk_file(repo_root: pathlib.Path, file_path: pathlib.Path) -> List[dict]:
         parent_cls = parent_class_name(n, src)
         astpath = build_ast_path(n, src)
 
-        # the only thing we will embed later:
         text = "\n".join([p for p in [sig, doc, code] if p])
 
         meta = {
-            "path": rel,
-            "language": lang_name,
-            "kind": kind,
-            "name": name,
-            "start_line": start,
-            "end_line": end,
-            "ast_path": astpath,
-            "exported": exported,
-            "parent_class": parent_cls,
-            "signature": sig,
+            "path": rel, "language": lang_name, "kind": kind, "name": nm,
+            "start_line": start, "end_line": end, "ast_path": astpath,
+            "exported": exported, "parent_class": parent_cls, "signature": sig,
             "docstring_len": 0 if not doc else len(doc.splitlines()),
             "code_len": len(code.splitlines()),
         }
-        cid = stable_id(rel, kind, name, start, end)
+        cid = stable_id(rel, kind, nm, start, end)
         chunks.append({"id": cid, "text": text, "meta": meta})
 
     return chunks
 
 def chunk_repo(repo_root: pathlib.Path, out_path: pathlib.Path) -> int:
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    src_files = [p for p in repo_root.rglob("*") if p.is_file() and p.suffix.lower() in SUPPORTED_EXTS]
+    print(f"Found {len(src_files)} source files under {repo_root}")
     total = 0
     with out_path.open("w", encoding="utf-8") as f:
-        for p in repo_root.rglob("*"):
-            if p.is_file() and p.suffix.lower() in SUPPORTED_EXTS:
-                for rec in chunk_file(repo_root, p):
-                    f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-                    total += 1
+        for p in src_files:
+            for rec in chunk_file(repo_root, p):
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                total += 1
     return total
 
 def main():
@@ -258,7 +330,7 @@ def main():
     total = chunk_repo(root, out)
     print(f"✓ Generated {total} chunks -> {out}")
     if total < 500:
-        print(f"⚠ Only {total} (<500). Consider a larger repo or loosen filters.")
+        print(f"⚠ Only {total} (<500). Consider a larger repo or choose a bigger one.")
 
 if __name__ == "__main__":
     main()
