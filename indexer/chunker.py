@@ -263,8 +263,15 @@ def chunk_file(repo_root: pathlib.Path, file_path: pathlib.Path) -> List[dict]:
 
 def chunk_repo(repo_root: pathlib.Path, out_path: pathlib.Path) -> int:
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    src_files = [p for p in repo_root.rglob("*")
-                 if p.is_file() and p.suffix.lower() in SUPPORTED_EXTS]
+    skip_dirs = {"node_modules", "dist", "build", ".git"}
+    src_files = []
+    for p in repo_root.rglob("*"):
+        if not p.is_file():
+            continue
+        if any(part in skip_dirs for part in p.parts):
+            continue
+        if p.suffix.lower() in SUPPORTED_EXTS:
+            src_files.append(p)
     print(f"Found {len(src_files)} source files under {repo_root}")
     total = 0
     with out_path.open("w", encoding="utf-8") as f:
