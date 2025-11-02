@@ -11,6 +11,7 @@ EXT2LANG = {
     ".tsx": "tsx",
 }
 JS_LIKE = set(EXT2LANG.keys())
+SKIP_DIRS = {"node_modules", "dist", "build", ".git"}
 
 # 注意：这里用字符串而不是bytes
 QUERY_SRC = """
