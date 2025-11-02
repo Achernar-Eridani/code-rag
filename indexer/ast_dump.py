@@ -5,10 +5,8 @@ from tree_sitter import Parser
 from tree_sitter_languages import get_language
 
 EXT2LANG = {
-    ".js": "javascript",
-    ".jsx": "javascript", 
-    ".ts": "typescript",
-    ".tsx": "tsx",
+    ".js": "javascript", ".jsx": "javascript",
+    ".ts": "typescript", ".tsx": "tsx",
 }
 JS_LIKE = set(EXT2LANG.keys())
 SKIP_DIRS = {"node_modules", "dist", "build", ".git"}
@@ -25,7 +23,12 @@ QUERY_SRC = """
 
 def iter_files(root: pathlib.Path):
     for p in root.rglob("*"):
-        if p.is_file() and p.suffix.lower() in JS_LIKE:
+        if not p.is_file():
+            continue
+        # 跳过大目录
+        if any(part in SKIP_DIRS for part in p.parts):
+            continue
+        if p.suffix.lower() in JS_LIKE:
             yield p
 
 def emit(fh, file_rel, kind, name_text, start_line, end_line):
@@ -50,8 +53,9 @@ def main():
     with outp.open("w", encoding="utf-8") as fh:
         for file in iter_files(repo):
             try:
-                # 简化处理：所有JS-like文件都用javascript parser
-                lang = get_language("javascript")
+                # 按扩展名选择语言
+                lang_name = EXT2LANG.get(file.suffix.lower(), "javascript")
+                lang = get_language(lang_name)
                 parser = Parser()
                 parser.set_language(lang)
                 
