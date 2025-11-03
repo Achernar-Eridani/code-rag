@@ -1,16 +1,24 @@
+# === Core Framework ===
 fastapi==0.110.0
 uvicorn[standard]==0.27.1
 pydantic==2.7.1
+
+# === Utilities ===
 loguru==0.7.2
-rich==13.7.1
-typer==0.9.0
 python-dotenv==1.0.1
+typer==0.9.0
+
+# === Code Parsing ===
 tree-sitter==0.21.1
 tree-sitter-languages==1.10.2
-numpy==1.26.4
-chromadb==0.4.24
-huggingface_hub==0.14.1
-transformers==4.33.3
-tokenizers==0.13.3
-sentence-transformers==2.2.2
-torch==2.3.1
+
+# === Vector Store (Chroma 1.x) ===
+chromadb>=1.0.0,<2.0.0
+numpy>=1.26.0,<2.0.0
+
+# === LLM Providers ===
+openai>=1.30.0
+
+# === Optional (uncomment when needed) ===
+# llama-cpp-python>=0.2.90  # Day 7 本地 LLM
+# dashscope>=1.14.0         # Qwen API（可选）
