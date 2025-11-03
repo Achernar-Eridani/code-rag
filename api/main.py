@@ -3,6 +3,9 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 import pathlib, sys, time, textwrap, os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 ROOT = pathlib.Path(__file__).parent.parent
 if str(ROOT) not in sys.path:
