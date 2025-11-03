@@ -4,8 +4,11 @@ from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 import pathlib, sys, time, textwrap, os
 from dotenv import load_dotenv
+import re, unicodedata
 
 load_dotenv()
+_SURR_RE = re.compile(r'[\ud800-\udfff]')  # 代理区
+_CTRL_RE = re.compile(r'[\x00-\x08\x0B\x0C\x0E-\x1F]')  # 可见之外的控制符（保留 \t\n\r）
 
 ROOT = pathlib.Path(__file__).parent.parent
 if str(ROOT) not in sys.path:
@@ -22,6 +25,20 @@ def get_searcher() -> HybridSearcher:
     if _searcher is None:
         _searcher = HybridSearcher()
     return _searcher
+
+def sanitize(text: str) -> str:
+    if not isinstance(text, str):
+        return text
+    # 去掉代理区与控制符
+    text = _SURR_RE.sub('', text)
+    text = _CTRL_RE.sub('', text)
+    # 也可按需再做 NFC 归一化
+    try:
+        text = unicodedata.normalize('NFC', text)
+    except Exception:
+        pass
+    return text
+
 
 @app.get("/ping")
 def ping():
@@ -106,24 +123,26 @@ class ExplainResponse(BaseModel):
     model: str
     provider: str
 
-SYSTEM_PROMPT = """你是一名专业的代码助手。请仅基于提供的上下文回答问题：
-- 不编造未给出的事实；无法确定就明确说明“不确定”
-- 回答尽量简洁，必要时给出 1-3 个要点列表
-- 在合适之处引用证据编号，例如 [#1]、[#2]
+SYSTEM_PROMPT = """You are a professional code assistant. Answer ONLY based on the provided context.
+- If uncertain, say "Not sure" and state the missing info.
+- Be concise; use 1–3 bullet points when helpful.
+- Cite evidence like [#1], [#2].
+- IMPORTANT: Respond in **English** only.
 """
+
 
 def build_context_blocks(results: List[dict], max_ctx_chars: int, max_chunk_chars: int) -> str:
     ctx = []
     used = 0
     for i, r in enumerate(results, 1):
         m = r["metadata"]
-        full = r.get("text_full") or ""
-        snippet = full[:max_chunk_chars]
-        block = textwrap.dedent(f"""
+        full = sanitize(r.get("text_full") or "")
+        snippet = sanitize(full[:max_chunk_chars])
+        block = sanitize(textwrap.dedent(f"""
         [#{i}] {m.get('kind','')} {m.get('name','')}  @ {m.get('path','')}  L{m.get('start_line',0)}-{m.get('end_line',0)}
         ---
         {snippet}
-        """).strip()
+        """).strip())
         if used + len(block) > max_ctx_chars:
             break
         ctx.append(block)
@@ -162,7 +181,7 @@ def explain(req: ExplainRequest):
 
     # 2) 上下文
     ctx_text = build_context_blocks(results, req.max_ctx_chars, req.max_chunk_chars)
-    user_prompt = textwrap.dedent(f"""
+    user_prompt = sanitize(textwrap.dedent(f"""
     问题：
     {req.query}
 
@@ -173,7 +192,7 @@ def explain(req: ExplainRequest):
     - 优先结合证据中的函数名/注释/实现细节
     - 对“如何实现/如何使用”类问题，给出简要步骤或伪代码
     - 必要时用 [#编号] 引用证据
-    """).strip()
+    """).strip())
 
     # 3) LLM 调用（失败→降级）
     provider = (req.provider or os.getenv("RAG_LLM_PROVIDER") or "openai").lower()
