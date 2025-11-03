@@ -3,6 +3,12 @@
 Day 3（新版栈）：Hybrid 检索 v1（符号优先 + 向量召回 + ast_path 去重）
 - 不再手动生成查询向量，直接用 collection.query(query_texts=[...])
 """
+"""
+Hybrid 检索 v1
+- 支持 include_documents: True 时返回 text_full（给 /explain 用）
+- 默认 False，仅返回 text_preview（给 /search 用）
+"""
+
 import re
 from typing import Any, Dict, List
 
@@ -42,10 +48,16 @@ class HybridSearcher:
                 best[key] = r
         return list(best.values())
 
-    def search(self, query: str, top_k: int = 10, symbol_boost: float = 2.0) -> List[Dict[str, Any]]:
+    def search(
+        self,
+        query: str,
+        top_k: int = 10,
+        symbol_boost: float = 2.0,
+        include_documents: bool = False,
+    ) -> List[Dict[str, Any]]:
         assert isinstance(query, str) and query.strip(), "query 不能为空"
 
-        # 1) 向量检索（由集合的 embedding function 自动嵌入 query）
+        # 1) 向量召回（由集合的 embedding function 自动对 query 嵌入）
         n_cand = min(top_k * 2, 100)
         hits = self.col.query(
             query_texts=[query],
@@ -68,7 +80,7 @@ class HybridSearcher:
 
             base_score = 1.0 / (1.0 + dist)
 
-            # 轻量符号加权：name 精确=1.0 / 包含=0.5；doc 出现=0.1
+            # 2) 轻量符号加权：name 精确=1.0 / 包含=0.5；doc 出现=0.1
             sym_score = 0.0
             name = (meta.get("name") or "").lower()
             dlow = doc.lower()
@@ -82,18 +94,20 @@ class HybridSearcher:
 
             final = base_score + symbol_boost * sym_score
 
-            results.append(
-                {
-                    "id": ids[i],
-                    "score": final,
-                    "base_score": base_score,
-                    "symbol_score": sym_score,
-                    "metadata": meta,
-                    "text_preview": doc[:200],
-                    "distance": dist,
-                }
-            )
+            item = {
+                "id": ids[i],
+                "score": final,
+                "base_score": base_score,
+                "symbol_score": sym_score,
+                "metadata": meta,
+                "text_preview": doc[:200],
+                "distance": dist,
+            }
+            if include_documents:
+                item["text_full"] = doc
+            results.append(item)
 
+        # 3) 按 ast_path 去重 + 排序 + 截断
         results = self._dedup_by_ast_path(results)
         results.sort(key=lambda x: x["score"], reverse=True)
         return results[:top_k]
@@ -119,7 +133,7 @@ if __name__ == "__main__":
     hs = HybridSearcher()
     for q in ["asciiToArray", "Parser", "get_language", "build ast path", "chunk function"]:
         print("=" * 60, "\nQuery:", q)
-        rs = hs.search(q, top_k=3)
+        rs = hs.search(q, top_k=3, include_documents=False)
         for j, r in enumerate(rs, 1):
             m = r["metadata"]
             print(f"[{j}] score={r['score']:.3f} (base={r['base_score']:.3f}, sym={r['symbol_score']:.3f})")
