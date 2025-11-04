@@ -1,22 +1,94 @@
 {
-  "name": "vscode",
-  "version": "1.0.0",
-  "main": "index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+  "name": "code-rag-assistant",
+  "displayName": "Code RAG Assistant (MVP)",
+  "description": "Search & Explain your code via local RAG backend (/search, /explain).",
+  "version": "0.1.0",
+  "publisher": "your-publisher-id",
+  "engines": { "vscode": "^1.84.0" },
+  "categories": ["Other"],
+  "activationEvents": [
+    "onCommand:rag.search",
+    "onCommand:rag.explain"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      { "command": "rag.search", "title": "RAG: Search Code" },
+      { "command": "rag.explain", "title": "RAG: Explain Selection" }
+    ],
+    "configuration": {
+      "type": "object",
+      "title": "Code RAG Assistant",
+      "properties": {
+        "rag.apiBase": {
+          "type": "string",
+          "default": "http://127.0.0.1:8000",
+          "description": "Your RAG API base URL."
+        },
+        "rag.topK": {
+          "type": "number",
+          "default": 8,
+          "description": "Top-K results for /search and /explain."
+        },
+        "rag.symbolBoost": {
+          "type": "number",
+          "default": 2.0,
+          "description": "Symbol priority boost for hybrid search."
+        },
+        "rag.providerOverride": {
+          "type": "string",
+          "enum": ["auto", "openai", "local", "qwen_api"],
+          "default": "auto",
+          "description": "Force provider for /explain (auto uses backend default)."
+        },
+        "rag.maxTokens": {
+          "type": "number",
+          "default": 600,
+          "description": "Max LLM output tokens."
+        },
+        "rag.maxCtxChars": {
+          "type": "number",
+          "default": 6000,
+          "description": "Max context chars passed to LLM."
+        },
+        "rag.repoPathPrefix": {
+          "type": "string",
+          "default": "",
+          "description": "Path prefix to strip from indexed paths (e.g., 'test_repos/lodash/')."
+        }
+      }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "rag-container",
+          "title": "Code RAG",
+          "icon": "$(search)"
+        }
+      ]
+    },
+    "views": {
+      "rag-container": [
+        {
+          "id": "ragSearchView",
+          "name": "Search Results"
+        }
+      ]
+    }
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "description": "",
-  "dependencies": {
-    "axios": "^1.13.1"
+  "scripts": {
+    "build": "esbuild ./src/extension.ts --bundle --outfile=out/extension.js --platform=node --external:vscode",
+    "watch": "esbuild ./src/extension.ts --bundle --outfile=out/extension.js --platform=node --external:vscode --watch",
+    "package": "vsce package"
   },
   "devDependencies": {
-    "@types/node": "^24.10.0",
-    "@types/vscode": "^1.105.0",
-    "esbuild": "^0.25.12",
-    "typescript": "^5.9.3",
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.84.0",
+    "esbuild": "^0.23.0",
+    "typescript": "^5.4.0",
     "vsce": "^2.15.0"
+  },
+  "dependencies": {
+    "axios": "^1.7.7"
   }
 }
