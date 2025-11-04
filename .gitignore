@@ -5,3 +5,4 @@ data/
 dist/
 .env
 .env.*
+clients/vscode/node_modules
