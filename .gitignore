@@ -6,3 +6,4 @@ dist/
 .env
 .env.*
 clients/vscode/node_modules
+eval/results/
