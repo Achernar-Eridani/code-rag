@@ -122,6 +122,7 @@ class ExplainResponse(BaseModel):
     timings_ms: Dict[str, float]
     model: str
     provider: str
+    usage: Optional[Dict[str, Any]] = None
 
 SYSTEM_PROMPT = """You are a professional code assistant. Answer ONLY based on the provided context.
 - If uncertain, say "Not sure" and state the missing info.
@@ -176,7 +177,8 @@ def explain(req: ExplainRequest):
             query=req.query, answer="未检索到相关代码片段。",
             evidences=[], timings_ms={"retrieval": round((t1-t0)*1000,2), "generation": 0},
             model=req.model or (os.getenv("RAG_LLM_MODEL") or "unset"),
-            provider=req.provider or (os.getenv("RAG_LLM_PROVIDER") or "openai")
+            provider=req.provider or (os.getenv("RAG_LLM_PROVIDER") or "openai"),
+            usage=None
         )
 
     # 2) 上下文
@@ -190,7 +192,7 @@ def explain(req: ExplainRequest):
 
     要求：
     - 优先结合证据中的函数名/注释/实现细节
-    - 对“如何实现/如何使用”类问题，给出简要步骤或伪代码
+    - 对"如何实现/如何使用"类问题，给出简要步骤或伪代码
     - 必要时用 [#编号] 引用证据
     """).strip())
 
@@ -208,6 +210,7 @@ def explain(req: ExplainRequest):
             max_tokens=req.max_tokens,
         )
         t3 = time.perf_counter()
+        
         # 证据列表
         evs: List[Evidence] = []
         for r in results:
@@ -217,12 +220,17 @@ def explain(req: ExplainRequest):
                 kind=str(m.get("kind","")), start_line=int(m.get("start_line",0) or 0),
                 end_line=int(m.get("end_line",0) or 0), score=float(r.get("score",0.0))
             ))
+        
         return ExplainResponse(
-            query=req.query, answer=text, evidences=evs,
+            query=req.query, 
+            answer=text, 
+            evidences=evs,
             timings_ms={"retrieval": round((t1-t0)*1000,2), "generation": round((t3-t2)*1000,2)},
             model=(meta.get("usage",{}) or {}).get("model") or str(model),
-            provider=provider
+            provider=provider,
+            usage=meta.get("usage")  # ← 关键：透传 usage
         )
+        
     except HTTPException:
         # 优雅降级：返回证据摘要（仍然 200）
         t3 = time.perf_counter()
@@ -238,5 +246,6 @@ def explain(req: ExplainRequest):
         return ExplainResponse(
             query=req.query, answer=fallback, evidences=evs,
             timings_ms={"retrieval": round((t1-t0)*1000,2), "generation": round((t3-t2)*1000,2)},
-            model=str(model), provider=provider
+            model=str(model), provider=provider,
+            usage=None  # 降级时没有 usage
         )
