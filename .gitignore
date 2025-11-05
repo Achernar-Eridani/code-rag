@@ -6,5 +6,8 @@ dist/
 .env
 .env.*
 clients/vscode/node_modules
-eval/results/
-clients/vscode/out
+eval/results/*
+!eval/results/.gitkeep
+clients/vscode/out/
+clients/vscode/*.vsix
+models/*.gguf
