@@ -1,0 +1,3 @@
+{"id":"q1","query":"What does asciiToArray do?","expect":{"must_any":["split('')","array of characters"],"hit":["lodash.js:asciiToArray"]}}
+{"id":"q2","query":"Find the implementation of lodash chunk","expect":{"must_any":["create an array of elements split into groups"],"hit":["lodash.js:chunk","underscore.js:chunk"]}}
+{"id":"q3","query":"How to count unicode symbols length in lodash?","expect":{"must_any":["count symbols","unicode"],"hit":["lodash.js:stringSize","lodash.js:hasUnicode"]}}
