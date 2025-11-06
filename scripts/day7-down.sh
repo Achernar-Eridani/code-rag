@@ -1,14 +1,15 @@
+#!/usr/bin/env bash
 set -euo pipefail
 
-# Try to kill by known pids (if stored) or by port
-echo "Killing uvicorn (8000) and llama server (8081) by port..."
-# Windows Git Bash 下可用
-# uvicorn
-pid_api=$(netstat -ano | grep ":8000" | awk '{print $5}' | head -n1)
-# llama
-pid_llm=$(netstat -ano | grep ":8081" | awk '{print $5}' | head -n1)
+echo "Stopping services..."
 
-[ -n "${pid_api:-}" ] && taskkill //PID "$pid_api" //F || true
-[ -n "${pid_llm:-}" ] && taskkill //PID "$pid_llm" //F || true
+# 使用tasklist和taskkill
+if command -v tasklist.exe >/dev/null 2>&1; then    
+    tasklist.exe | grep -i "server" | awk '{print $2}' | while read pid; do
+        taskkill.exe //PID "$pid" //F 2>/dev/null || true
+    done
+else
+    pkill -f "llama.*server" || true
+fi
 
-echo "Done."
+echo "Services stopped."

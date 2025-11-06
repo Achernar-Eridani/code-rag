@@ -65,8 +65,11 @@ class LLMClient:
                 raise HTTPException(status_code=400, detail="未检测到 DASHSCOPE_API_KEY")
             self.dashscope = dashscope
             self.model = self.model or os.getenv("QWEN_API_MODEL", "qwen2.5-coder-7b-instruct")
-            self.timeout = float(os.getenv("LLM_TIMEOUT_SEC", "60"))
-            # 这里先不实现，后续如需可补
+            if self.provider == "local":
+                self.timeout = float(os.getenv("LOCAL_LLM_TIMEOUT_SEC", "120"))  # 本地更长
+            else:
+                self.timeout = float(os.getenv("LLM_TIMEOUT_SEC", "60"))
+                        # 这里先不实现，后续如需可补
 
         elif self.provider == "local":
             # --- 本地 LLM（默认：llama.cpp server - OpenAI 兼容） ---
@@ -77,7 +80,10 @@ class LLMClient:
             # 2) python 兜底：LOCAL_LLM_MODE=python 且设置 QWEN_GGUF_PATH 指向 .gguf 文件，
             #    使用 llama-cpp-python 直接加载（Windows 上可能涉及编译，不推荐 MVP 用）
             mode = (os.getenv("LOCAL_LLM_MODE") or "http").lower()
-            self.timeout = float(os.getenv("LLM_TIMEOUT_SEC", "60"))
+            if self.provider == "local":
+                self.timeout = float(os.getenv("LOCAL_LLM_TIMEOUT_SEC", "120"))  # 本地更长
+            else:
+                self.timeout = float(os.getenv("LLM_TIMEOUT_SEC", "60"))
 
             if mode == "http":
                 if requests is None:
