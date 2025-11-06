@@ -2,7 +2,7 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
-import pathlib, sys, time, textwrap, os
+import pathlib, sys, time, textwrap, os, math
 from dotenv import load_dotenv
 import re, unicodedata
 
@@ -39,18 +39,41 @@ def sanitize(text: str) -> str:
         pass
     return text
 
+# --- (新增) 3.3 增强：Token 估算函数 ~4 字符 ≈ 1 token（足够做观测） ---
+def _estimate_tokens(s: str) -> int:
+    # 粗略估算：~4 字符 ≈ 1 token（足够做观测）
+    if not isinstance(s, str):
+        return 0
+    return max(1, math.ceil(len(s) / 4))
 
 @app.get("/ping")
 def ping():
     provider = (os.getenv("RAG_LLM_PROVIDER") or "openai").lower()
     model = os.getenv("RAG_LLM_MODEL") or os.getenv("QWEN_API_MODEL") or os.getenv("QWEN_GGUF_PATH") or "unset"
-    return {"ok": True, "provider": provider, "model": model}
+    real_id = None
+    if provider == "local":
+        import requests  # 本函数内导入，避免无依赖环境报错
+        base = (os.getenv("LOCAL_LLM_BASE") or "http://127.0.0.1:8081/v1").rstrip("/")
+        try:
+            r = requests.get(f"{base}/models", timeout=2)
+            if r.ok:
+                data = r.json()
+                if isinstance(data, dict) and isinstance(data.get("data"), list) and data["data"]:
+                    real_id = data["data"][0].get("id") or None
+        except Exception:
+            pass
+    return {"ok": True, "provider": provider, "model": real_id or model}
+
 
 # ===== Day3: /search =====
 class SearchRequest(BaseModel):
     query: str = Field(..., min_length=1)
     top_k: int = 10
     symbol_boost: float = 2.0
+    path_prefix: Optional[str] = None
+    kind: Optional[str] = None
+    min_score: Optional[float] = None
+
 
 class SearchResult(BaseModel):
     id: str
@@ -86,6 +109,15 @@ def search(req: SearchRequest):
                 text_preview=str(r.get("text_preview", "")),
             )
         )
+    # 简单过滤（API 层，不影响底层检索实现）
+    if req.path_prefix:
+        pref = req.path_prefix.replace("\\", "/")
+        out = [x for x in out if x.path.replace("\\", "/").startswith(pref)]
+    if req.kind:
+        out = [x for x in out if (x.kind or "").lower() == req.kind.lower()]
+    if req.min_score is not None:
+        out = [x for x in out if x.score >= float(req.min_score)]
+
     return SearchResponse(query=req.query, total=len(out), results=out)
 
 @app.get("/search/{symbol}")
@@ -220,15 +252,23 @@ def explain(req: ExplainRequest):
                 kind=str(m.get("kind","")), start_line=int(m.get("start_line",0) or 0),
                 end_line=int(m.get("end_line",0) or 0), score=float(r.get("score",0.0))
             ))
-        
+
+        # --- (新增) 3.3 增强：估算 Token ---
+        usage = meta.get("usage") or {}
+        if usage.get("total_tokens") is None:
+            pt = _estimate_tokens(ctx_text)
+            ct = _estimate_tokens(text)
+            usage = {**usage, "prompt_tokens": pt, "completion_tokens": ct, "total_tokens": pt + ct, "estimated": True}
+        # --- 增强结束 ---
+
         return ExplainResponse(
             query=req.query, 
             answer=text, 
             evidences=evs,
             timings_ms={"retrieval": round((t1-t0)*1000,2), "generation": round((t3-t2)*1000,2)},
-            model=(meta.get("usage",{}) or {}).get("model") or str(model),
+            model=(usage or {}).get("model") or str(model),  # (已修改) 使用 usage 里的 model
             provider=provider,
-            usage=meta.get("usage")  # ← 关键：透传 usage
+            usage=usage  # (已修改) 传入估算后的 usage
         )
         
     except HTTPException:
