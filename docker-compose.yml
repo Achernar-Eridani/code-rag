@@ -50,3 +50,27 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+  
+  redis:
+    image: redis:7
+    container_name: coderag-redis
+    ports:
+      - "6379:6379"
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: coderag-worker
+    # **关键：开发阶段挂代码目录，worker 能 import 到最新代码**
+    volumes:
+      - .:/app
+      - ./data:/app/data
+      - ./logs:/app/logs
+    environment:
+      - RAG_LLM_PROVIDER=local
+      - LOCAL_LLM_BASE=http://llama:8080/v1
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - redis
+    command: ["rq", "worker", "coderag"]
