@@ -1,0 +1,25 @@
+# Git / VCS
+.git
+.gitignore
+
+# Python 虚拟环境 / 缓存
+.venv
+__pycache__
+*.py[cod]
+*.pyo
+
+# Node / 前端依赖（VS Code 插件）
+node_modules
+clients/vscode/node_modules
+clients/vscode/dist
+
+# 大体积数据目录（运行时用 volume 挂载，不需要构建进镜像）
+data
+models
+logs
+
+# 编辑器 / 系统文件
+.DS_Store
+.vscode
+.idea
+*.log
