@@ -1,3 +1,5 @@
+# docker-compose.yml
+version: "3.9"
 services:
   # 1. FastAPI 后端服务
   api:
@@ -12,8 +14,8 @@ services:
       - RAG_LLM_PROVIDER=local
       # 关键：容器间通信用服务名 "llama"，端口是 8080
       - LOCAL_LLM_BASE=http://llama:8080/v1
-      # 随便填一个 Key 防止报错
-      - OPENAI_API_KEY=dummy
+      # 如果想切到 openai，用到的时候可以在 .env 里配置
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-dummy}
     volumes:
       # 挂载本地 data 目录，保证你的向量库持久化
       - ./data:/app/data
@@ -38,7 +40,7 @@ services:
       # GPU 层数（根据你显存调整，35 基本是全进显存）
       - LLAMA_ARG_N_GPU_LAYERS=35
     volumes:
-      # ⚠️ 关键：把你本地的 models 目录挂载到容器的 /models
+      # ⚠️ 关键：把本地的 models 目录挂载到容器的 /models
       - ./models:/models
     # 开启 GPU 支持 (Docker Compose v2 语法)
     deploy:
