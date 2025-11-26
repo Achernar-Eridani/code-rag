@@ -1,0 +1,50 @@
+services:
+  # 1. FastAPI 后端服务
+  api:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    container_name: coderag-api
+    ports:
+      - "8000:8000"
+    environment:
+      # 告诉后端使用 Local 模式
+      - RAG_LLM_PROVIDER=local
+      # 关键：容器间通信用服务名 "llama"，端口是 8080
+      - LOCAL_LLM_BASE=http://llama:8080/v1
+      # 随便填一个 Key 防止报错
+      - OPENAI_API_KEY=dummy
+    volumes:
+      # 挂载本地 data 目录，保证你的向量库持久化
+      - ./data:/app/data
+      # 挂载 logs 目录，方便在宿主机看日志
+      - ./logs:/app/logs
+    depends_on:
+      - llama
+
+  # 2. 本地 LLM 推理服务 (llama.cpp)
+  llama:
+    # 使用支持 CUDA 的 Docker 镜像
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    container_name: coderag-llama
+    ports:
+      # 宿主机 8081 -> 容器 8080
+      - "8081:8080"
+    environment:
+      # 指定模型路径（容器内的路径）
+      - LLAMA_ARG_MODEL=/models/qwen2.5-coder-7b-instruct-q6_k.gguf
+      # 上下文长度
+      - LLAMA_ARG_CTX_SIZE=8192
+      # GPU 层数（根据你显存调整，35 基本是全进显存）
+      - LLAMA_ARG_N_GPU_LAYERS=35
+    volumes:
+      # ⚠️ 关键：把你本地的 models 目录挂载到容器的 /models
+      - ./models:/models
+    # 开启 GPU 支持 (Docker Compose v2 语法)
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
