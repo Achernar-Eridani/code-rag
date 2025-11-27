@@ -2,9 +2,11 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
-import pathlib, sys, time, textwrap, os, math
+import pathlib, sys, time, textwrap, os, math, json
 from dotenv import load_dotenv
 import re, unicodedata
+from indexer.tasks import enqueue_rebuild_embeddings
+from fastapi.responses import StreamingResponse
 
 from rq.job import Job
 
@@ -386,11 +388,163 @@ def explain(req: ExplainRequest):
         )
 
 
+# ===== /explain_stream (Phase 3 SSE 接口) =====
+@app.post("/explain_stream")
+def explain_stream(req: ExplainRequest):
+    """
+    SSE 流式版本的 /explain：
+    - 复用同样的检索 + 上下文构造逻辑
+    - LLM 仍然一次性 complete，但通过 SSE 分块推给前端
+    """
+    # 1. 检索
+    t0 = time.perf_counter()
+    hs = get_searcher()
+    # 注意：这里可能会抛出异常（如果索引正在重建），外层 FastAPI 会处理 500
+    # 生产环境建议加 try-except
+    results = hs.search(
+        req.query,
+        top_k=req.top_k,
+        symbol_boost=req.symbol_boost,
+        include_documents=True,
+    )
+    t1 = time.perf_counter()
+
+    # 如果没结果，返回一个直接结束的流
+    if not results:
+        def no_result():
+            payload = {
+                "type": "done",
+                "error": "no_results",
+                "message": "未检索到相关代码片段。",
+            }
+            yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        return StreamingResponse(no_result(), media_type="text/event-stream")
+
+    # 2. 构建上下文
+    ctx_text = build_context_blocks(results, req.max_ctx_chars, req.max_chunk_chars)
+    user_prompt = sanitize(
+        textwrap.dedent(
+            f"""
+            问题：
+            {req.query}
+
+            可用证据（按编号引用）：
+            {ctx_text}
+
+            要求：
+            - 优先结合证据中的函数名/注释/实现细节
+            - 对"如何实现/如何使用"类问题，给出简要步骤或伪代码
+            - 必要时用 [#编号] 引用证据
+            """
+        ).strip()
+    )
+
+    provider = (req.provider or os.getenv("RAG_LLM_PROVIDER") or "openai").lower()
+    model = (
+        req.model
+        or os.getenv("RAG_LLM_MODEL")
+        or os.getenv("QWEN_API_MODEL")
+        or os.getenv("QWEN_GGUF_PATH")
+        or "unset"
+    )
+
+    # 3. 定义生成器
+    def event_stream():
+        # A) 发送 Meta 信息 (检索耗时等)
+        head = {
+            "type": "meta",
+            "query": req.query,
+            "retrieval_ms": round((t1 - t0) * 1000, 2),
+            "total_hits": len(results),
+            "provider": provider,
+            "model": model,
+        }
+        yield f"data: {json.dumps(head, ensure_ascii=False)}\n\n"
+
+        # B) 调用 LLM (注意：目前是阻塞的，用户需要等这里生成完)
+        t2 = time.perf_counter()
+        try:
+            llm = LLMClient(provider=provider, model=model)
+            full_text, meta = llm.complete(
+                system_prompt=SYSTEM_PROMPT,
+                user_prompt=user_prompt,
+                temperature=req.temperature,
+                max_tokens=req.max_tokens,
+            )
+            t3 = time.perf_counter()
+
+            # C) 模拟流式推送 (分块发送文本)
+            chunk_size = 20  # 设置小一点，模拟打字机效果更明显
+            for i in range(0, len(full_text), chunk_size):
+                chunk = full_text[i : i + chunk_size]
+                if not chunk:
+                    continue
+                payload = {
+                    "type": "chunk",
+                    "text": chunk,
+                }
+                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                # time.sleep(0.01) # 如果想在本地测试时看效果，可以取消注释
+
+            # D) 发送 Done (包含 Usage 和 Timings)
+            usage = meta.get("usage") or {}
+            if usage.get("total_tokens") is None:
+                pt = _estimate_tokens(ctx_text)
+                ct = _estimate_tokens(full_text)
+                usage = {
+                    **usage,
+                    "prompt_tokens": pt,
+                    "completion_tokens": ct,
+                    "total_tokens": pt + ct,
+                    "estimated": True,
+                }
+
+            done_payload = {
+                "type": "done",
+                "timings_ms": {
+                    "retrieval": round((t1 - t0) * 1000, 2),
+                    "generation": round((t3 - t2) * 1000, 2),
+                },
+                "usage": usage,
+            }
+            yield f"data: {json.dumps(done_payload, ensure_ascii=False)}\n\n"
+
+        except Exception as e:
+            # 异常处理：发送 Error 事件 + 降级摘要
+            t3 = time.perf_counter()
+            fallback = build_fallback_answer(req.query, results)
+            
+            err_payload = {
+                "type": "error",
+                "message": str(e),
+                "timings_ms": {
+                    "retrieval": round((t1 - t0) * 1000, 2),
+                    "generation": round((t3 - t2) * 1000, 2),
+                },
+            }
+            yield f"data: {json.dumps(err_payload, ensure_ascii=False)}\n\n"
+
+            # 推送降级文本
+            fb_payload = {
+                "type": "chunk",
+                "text": fallback,
+            }
+            yield f"data: {json.dumps(fb_payload, ensure_ascii=False)}\n\n"
+
+            # 结束流
+            yield f"data: {json.dumps({'type': 'done', 'usage': None}, ensure_ascii=False)}\n\n"
+
+    # 返回 StreamingResponse
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
 # ===== 新增：/index 重建 & 状态查询 =====
 
 class IndexRebuildRequest(BaseModel):
-    repo_root: str = Field(..., description="需要重建索引的仓库路径，例如 D:/code-rag/example-repo")
-
+    chunks: str = "data/chunks_day2.jsonl"
+    db: str = "data/chroma_db"
+    collection: str = "code_chunks"
+    batch_size: int = 100
+    fresh: bool = True
 
 class IndexRebuildResponse(BaseModel):
     job_id: str
@@ -407,10 +561,13 @@ class IndexStatus(BaseModel):
 
 @app.post("/index/rebuild", response_model=IndexRebuildResponse)
 def index_rebuild(req: IndexRebuildRequest):
-    """
-    提交重建索引任务，返回 job_id，让前端 / VS Code 去轮询状态。
-    """
-    job_id = enqueue_rebuild_embeddings(req.repo_root, fresh=True)
+    job_id = enqueue_rebuild_embeddings(
+        chunks=req.chunks,
+        db=req.db,
+        collection=req.collection,
+        batch_size=req.batch_size,
+        fresh=req.fresh,
+    )
     return IndexRebuildResponse(job_id=job_id)
 
 
