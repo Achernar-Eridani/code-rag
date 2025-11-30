@@ -1,47 +1,46 @@
-# docker-compose.yml
 services:
   # 1. FastAPI 后端服务
   api:
-    build: 
+    build:
       context: .
       dockerfile: Dockerfile
     container_name: coderag-api
     ports:
       - "8000:8000"
     environment:
-      # 告诉后端使用 Local 模式
-      - RAG_LLM_PROVIDER=local
-      # 关键：容器间通信用服务名 "llama"，端口是 8080
-      - LOCAL_LLM_BASE=http://llama:8080/v1
-      # 如果想切到 openai，用到的时候可以在 .env 里配置
+      # LLM 提供方 & 模型，默认走 OpenAI，具体用哪家由 .env 控制
+      - RAG_LLM_PROVIDER=${RAG_LLM_PROVIDER:-openai}
+      - RAG_LLM_MODEL=${RAG_LLM_MODEL:-gpt-4o-mini}
+      # 本地 llama 时用到的 base URL（Windows + GPU 场景）
+      - LOCAL_LLM_BASE=${LOCAL_LLM_BASE:-http://llama:8080/v1}
+      # OpenAI key（在 .env 里填）
       - OPENAI_API_KEY=${OPENAI_API_KEY:-dummy}
+      # Redis 连接（缓存 / RQ 都用得到）
+      - REDIS_URL=redis://redis:6379/0
     volumes:
       # 挂载本地 data 目录，保证你的向量库持久化
       - ./data:/app/data
       # 挂载 logs 目录，方便在宿主机看日志
       - ./logs:/app/logs
+      # 挂载 chroma 缓存目录，避免每次重启都重新下载 ONNX 模型
+      - ./cache/chroma:/root/.cache/chroma
     depends_on:
-      - llama
+      - redis
+      # llama 是可选服务，不强依赖
+      # - llama
 
-  # 2. 本地 LLM 推理服务 (llama.cpp)
+  # 2. 本地 LLM 推理服务 (llama.cpp) —— 仅在 Windows + GPU 场景使用
   llama:
-    # 使用支持 CUDA 的 Docker 镜像
     image: ghcr.io/ggml-org/llama.cpp:server-cuda
     container_name: coderag-llama
     ports:
-      # 宿主机 8081 -> 容器 8080
-      - "8081:8080"
+      - "8081:8080" # 宿主机 8081 -> 容器 8080
     environment:
-      # 指定模型路径（容器内的路径）
       - LLAMA_ARG_MODEL=/models/qwen2.5-coder-7b-instruct-q6_k.gguf
-      # 上下文长度
       - LLAMA_ARG_CTX_SIZE=8192
-      # GPU 层数（根据你显存调整，35 基本是全进显存）
       - LLAMA_ARG_N_GPU_LAYERS=35
     volumes:
-      # ⚠️ 关键：把本地的 models 目录挂载到容器的 /models
       - ./models:/models
-    # 开启 GPU 支持 (Docker Compose v2 语法)
     deploy:
       resources:
         reservations:
@@ -49,27 +48,35 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
-  
+
+  # 3. Redis（缓存 & RQ）
   redis:
     image: redis:7
     container_name: coderag-redis
     ports:
       - "6379:6379"
 
+  # 4. RQ Worker
   worker:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: coderag-worker
-    # **关键：开发阶段挂代码目录，worker 能 import 到最新代码**
+    # 开发阶段挂代码目录，worker 能 import 最新代码
     volumes:
       - .:/app
       - ./data:/app/data
       - ./logs:/app/logs
+      # 和 api 一样挂 chroma 缓存，保证 ONNX 模型只下一次
+      - ./cache/chroma:/root/.cache/chroma
     environment:
-      - RAG_LLM_PROVIDER=local
-      - LOCAL_LLM_BASE=http://llama:8080/v1
+      - RAG_LLM_PROVIDER=${RAG_LLM_PROVIDER:-openai}
+      - RAG_LLM_MODEL=${RAG_LLM_MODEL:-gpt-4o-mini}
+      - LOCAL_LLM_BASE=${LOCAL_LLM_BASE:-http://llama:8080/v1}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-dummy}
       - REDIS_URL=redis://redis:6379/0
     depends_on:
       - redis
+      # 同样不强依赖 llama
+      # - llama
     command: ["rq", "worker", "coderag"]

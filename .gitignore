@@ -11,3 +11,8 @@ eval/results/*
 clients/vscode/out/
 clients/vscode/*.vsix
 models/*.gguf
+
+# Chroma DB & cache
+data/chroma_db/
+cache/
+logs/
