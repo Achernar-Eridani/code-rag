@@ -10,6 +10,8 @@ from fastapi.responses import StreamingResponse
 
 from rq.job import Job
 
+from ai.agent import run_code_agent
+
 # 项目内模块
 ROOT = pathlib.Path(__file__).parent.parent
 if str(ROOT) not in sys.path:
@@ -592,4 +594,84 @@ def index_status(job_id: str):
         enqueued_at=ts(job.enqueued_at),
         started_at=ts(job.started_at),
         ended_at=ts(job.ended_at),
+    )
+
+
+#-------Agent Section----------#
+def agent_search_adapter(query: str, top_k: int = 6) -> List[Dict[str, Any]]:
+    """
+    给 Agent 用的搜索适配器：
+    复用现有 HybridSearcher，但返回更适合 LLM 消化的精简 JSON。
+    """
+    searcher = get_searcher()
+    # 这里根据你自己 searcher 的 API 来改：
+    # 假设有 search(query, top_k, include_documents=True)
+    results = searcher.search(query=query, top_k=top_k, include_documents=True)
+
+    simplified: List[Dict[str, Any]] = []
+    for r in results:
+        # 具体字段名请按你项目实际改，这里是按 /search 返回推的
+        meta = r.get("metadata", {}) if isinstance(r, dict) else getattr(r, "metadata", {}) or {}
+        simplified.append(
+            {
+                "path": meta.get("path"),
+                "symbol": meta.get("name"),
+                "kind": meta.get("kind"),
+                "start_line": meta.get("start_line"),
+                "end_line": meta.get("end_line"),
+                "score": r.get("score") if isinstance(r, dict) else getattr(r, "score", None),
+                # 给 LLM 一段实际代码内容
+                "code": (
+                    r.get("text_full")
+                    if isinstance(r, dict) and r.get("text_full")
+                    else r.get("text_preview") if isinstance(r, dict) else ""
+                ),
+            }
+        )
+    return simplified
+
+# === Agent Explain ===
+
+class AgentExplainRequest(BaseModel):
+    query: str
+    max_tokens: int = 512
+
+
+class AgentExplainResponse(BaseModel):
+    query: str
+    answer: str
+    used_tool: Optional[str] = None
+    tool_input: Optional[Dict[str, Any]] = None
+    # 这里只返回一部分结果，防止太长；真正的代码片段还是给 LLM 用
+    tool_results: Optional[List[Dict[str, Any]]] = None
+
+
+@app.post("/agent/explain", response_model=AgentExplainResponse)
+def agent_explain(req: AgentExplainRequest) -> AgentExplainResponse:
+    """
+    Code Agent 接口：
+    - 先由 LLM 决定是否调用 search_code 工具
+    - 如需调用，则检索代码 + 再由 LLM 生成解释 / 建议
+    """
+    try:
+        answer, debug = run_code_agent(
+            user_query=req.query,
+            search_func=agent_search_adapter,
+            max_tokens=req.max_tokens,
+        )
+    except Exception as e:
+        # 线上你可以这里用 logger 记录详细错误
+        raise HTTPException(status_code=500, detail=f"Agent error: {e}")
+
+    # tool_results 可能很长，这里可以只返回前 3 条
+    tool_results = debug.get("tool_results") or None
+    if tool_results:
+        tool_results = tool_results[:3]
+
+    return AgentExplainResponse(
+        query=req.query,
+        answer=answer,
+        used_tool=debug.get("used_tool"),
+        tool_input=debug.get("tool_input"),
+        tool_results=tool_results,
     )
