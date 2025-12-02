@@ -16,7 +16,7 @@ from typing import List, Optional
 from tree_sitter import Parser, Node
 from tree_sitter_languages import get_language
 
-# ---- config via env ----
+# 不按固定行数切代码，而是按 AST 节点切，默认一个 chunk 最多 200 行，并且会把紧邻上方的注释当作 docstring 拼进 chunk。 ----
 CHUNK_MAX_LINES = int(os.getenv("CHUNK_MAX_LINES", "200"))
 DOC_MAX_LINES   = int(os.getenv("DOC_MAX_LINES", "20"))
 COMMENT_GAP     = int(os.getenv("COMMENT_GAP", "2"))
@@ -28,7 +28,7 @@ EXT2LANG = {
 }
 SUPPORTED_EXTS = set(EXT2LANG.keys())
 
-# 只捕获“容器结点”，名字统一在代码里计算（避免 matches 的配对差异）
+# 需要哪些“容器节点”作为 chunk 单位 只捕获“容器结点”，名字统一在代码里计算（避免 matches 的配对差异）
 QUERY_STR = r"""
 ; comments for doc
 (comment) @comment
@@ -68,6 +68,7 @@ def limit_lines(text: str, max_lines: int) -> str:
     lines = text.splitlines()
     return text if len(lines) <= max_lines else "\n".join(lines[:max_lines])
 
+# 向上爬 AST，看是否包在 export_statement 里
 def is_exported(n: Node) -> bool:
     cur = n
     while cur is not None:
@@ -76,6 +77,7 @@ def is_exported(n: Node) -> bool:
         cur = cur.parent
     return False
 
+# 向上找到最近的 class_declaration，提取 class 名 知道自己父类
 def parent_class_name(n: Node, src: bytes) -> Optional[str]:
     cur = n
     while cur is not None:
@@ -86,6 +88,7 @@ def parent_class_name(n: Node, src: bytes) -> Optional[str]:
         cur = cur.parent
     return None
 
+# 沿着父链向上，将 class/function/method 名按“层级”拼成一条路径
 def build_ast_path(n: Node, src: bytes) -> str:
     parts = []
     cur = n
@@ -103,6 +106,7 @@ def build_ast_path(n: Node, src: bytes) -> str:
     parts.reverse()
     return "/".join(parts)
 
+# 压缩多余空白 相当于函数签名/定义摘要 方便embedding模型理解并且便于展示
 def extract_signature(n: Node, src: bytes) -> str:
     raw = node_text(src, n)
     lines = raw.splitlines()
@@ -114,6 +118,7 @@ def extract_signature(n: Node, src: bytes) -> str:
     sig = " ".join(" ".join(sig_lines).split())
     return sig[:200]
 
+# 收集注释
 def collect_comments(root: Node) -> List[Node]:
     out: List[Node] = []
     stack = [root]
@@ -125,6 +130,7 @@ def collect_comments(root: Node) -> List[Node]:
             stack.append(cur.named_child(i))
     return out
 
+# 拼接注释 作为chunk文档说明
 def preceding_doc(n: Node, src: bytes, comments: List[Node]) -> Optional[str]:
     start_line = n.start_point[0]
     picked = []
@@ -135,11 +141,13 @@ def preceding_doc(n: Node, src: bytes, comments: List[Node]) -> Optional[str]:
         return None
     return limit_lines("\n".join(picked), DOC_MAX_LINES)
 
+# 给每个chunk唯一id
 def stable_id(path: str, kind: str, name: str, start: int, end: int) -> str:
     h = hashlib.md5(f"{path}|{kind}|{name}|{start}|{end}".encode("utf-8")).hexdigest()
     return h[:12]
 
 # ---- name helpers (不依赖 matches 的配对关系) ----
+# 对于 function_declaration / class_declaration / method_definition / variable_declarator，统一用 field_name="name" 找名字
 def name_for_function_like(node: Node, src: bytes) -> Optional[str]:
     """function_declaration / class_declaration / method_definition / variable_declarator"""
     nm = node.child_by_field_name("name")
@@ -165,6 +173,7 @@ def name_for_assignment_left(left: Node, src: bytes) -> str:
     return node_text(src, left)
 
 # ---- core ----
+# 单个文件切 chunk
 def chunk_file(repo_root: pathlib.Path, file_path: pathlib.Path) -> List[dict]:
     if file_path.suffix.lower() not in SUPPORTED_EXTS:
         return []

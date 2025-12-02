@@ -12,7 +12,7 @@ from ai.tools import AGENT_TOOLS
 # search_func: (query, top_k) -> List[Dict]
 SearchFunc = Callable[[str, int], List[Dict[str, Any]]]
 
-
+# 由于使用openai function calling, 目前只能用在openai api
 def _get_openai_client() -> OpenAI:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:

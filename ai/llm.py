@@ -93,7 +93,7 @@ class LLMClient:
                 self.local_mode = "http"
 
             elif mode == "python":
-                # 可选兜底：直接用 llama-cpp-python
+                # 可选兜底：直接用 llama-cpp-python 默认使用http
                 try:
                     from llama_cpp import Llama  # type: ignore
                 except Exception:
@@ -121,7 +121,7 @@ class LLMClient:
                        total_tokens: Optional[int] = None) -> Dict[str, Any]:
         """
         统一把 usage 结构返回给上层。为兼容你现有 api/main.py 的读取方式，
-        保留把 model/provider 放在 usage 里的习惯。
+        保留把 model/provider 放在 usage 里的习惯。 即使本地 llama.cpp 不提供 token 数 返回none usage
         """
         return {
             "prompt_tokens": prompt_tokens,
@@ -131,6 +131,7 @@ class LLMClient:
             "provider": provider,
         }
 
+# 唯一对外接口
     def complete(
         self,
         system_prompt: str,
