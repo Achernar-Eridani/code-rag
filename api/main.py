@@ -29,7 +29,7 @@ from indexer.tasks import enqueue_rebuild_embeddings
 load_dotenv()
 
 # ------- 文本清洗 & token 估算 -------
-
+# 去掉 UTF-16 代理区字符（避免某些奇怪字符导致 JSON / LLM 崩）；
 _SURR_RE = re.compile(r"[\ud800-\udfff]")  # 代理区
 _CTRL_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F]")  # 控制符（保留 \t\n\r）
 
@@ -54,7 +54,7 @@ def _estimate_tokens(s: str) -> int:
 
 
 # ------- app & 搜索器 单例 -------
-
+# 使用了单例模式，服务启动时懒加载，之后复用内存对象
 app = FastAPI(title="Code-RAG MVP", version="0.5.0")
 
 _searcher: Optional[HybridSearcher] = None
@@ -124,7 +124,7 @@ class SearchResponse(BaseModel):
 
 @app.post("/search", response_model=SearchResponse)
 def search(req: SearchRequest):
-    # 1) 先查缓存
+    # 1) 先查缓存 用请求体 payload 做 key 哈希，如果命中直接返回，降低高频 query 的延迟
     payload = req.model_dump()
     cached = get_cached_search_response(SearchResponse, payload)
     if cached is not None:
@@ -171,7 +171,8 @@ def search(req: SearchRequest):
 
     return resp
 
-
+# 提供一个直接按符号名查的接口（不是自然语言 query）
+# VSCode 里点击某个函数名时，可以直接调用这个接口，跳到定义位置。
 @app.get("/search/{symbol}")
 def search_symbol(symbol: str, top_k: int = 10):
     hs = get_searcher()
@@ -179,7 +180,7 @@ def search_symbol(symbol: str, top_k: int = 10):
     return {"symbol": symbol, "total": len(rows), "results": rows}
 
 
-# ===== Day4: /explain（沿用你现有实现） =====
+# ===== Day4: /explain =====
 
 class ExplainRequest(BaseModel):
     query: str = Field(..., min_length=1)
@@ -220,7 +221,9 @@ SYSTEM_PROMPT = """You are a professional code assistant. Answer ONLY based on t
 - IMPORTANT: Respond in **English** only.
 """
 
-
+# 把检索结果按顺序拼成多段 [#{i}] ... 代码块；
+# 每段截断到 max_chunk_chars，整体不超过 max_ctx_chars；
+# 这里统一用 sanitize 防止脏字符。
 def build_context_blocks(results: List[dict], max_ctx_chars: int, max_chunk_chars: int) -> str:
     ctx = []
     used = 0
@@ -245,20 +248,20 @@ def build_context_blocks(results: List[dict], max_ctx_chars: int, max_chunk_char
 
 
 def build_fallback_answer(query: str, results: List[dict], max_items: int = 6) -> str:
-    lines = [f"（降级：LLM 不可用）基于检索证据对「{query}」的摘要："]
+    lines = [f"(Fallback: LLM unavailable) Summary of "{query}" based on retrieval evidence:"]
     for i, r in enumerate(results[:max_items], 1):
         m = r["metadata"]
         lines.append(
             f"- [#{i}] {m.get('kind','')} {m.get('name','')}  @ {m.get('path','')}  "
             f"L{m.get('start_line',0)}-{m.get('end_line',0)}（score={r.get('score',0):.2f}）"
         )
-    lines.append("提示：要获取自然语言解释，请配置 RAG_LLM_PROVIDER 与对应的 API/本地模型。")
+    lines.append("Note: To obtain natural language interpretation, please configure RAG_LLM_PROVIDER with the corresponding API/local model.")
     return "\n".join(lines)
 
 
 @app.post("/explain", response_model=ExplainResponse)
 def explain(req: ExplainRequest):
-    # 1) 检索
+    # 1) 检索 拿到完整代码文本
     t0 = time.perf_counter()
     hs = get_searcher()
     results = hs.search(
@@ -280,7 +283,7 @@ def explain(req: ExplainRequest):
             usage=None,
         )
 
-    # 2) 上下文
+    # 2) 上下文 限制上下文长度，拼出多段 [#{i}] 证据块；
     ctx_text = build_context_blocks(results, req.max_ctx_chars, req.max_chunk_chars)
     user_prompt = sanitize(
         textwrap.dedent(
@@ -359,6 +362,7 @@ def explain(req: ExplainRequest):
             provider=provider,
             usage=usage,
         )
+    # 如果 LLM 报错，自动降级为“基于检索结果的结构化摘要”
     except Exception:
         t3 = time.perf_counter()
         fallback = build_fallback_answer(req.query, results)
@@ -464,6 +468,7 @@ def explain_stream(req: ExplainRequest):
         yield f"data: {json.dumps(head, ensure_ascii=False)}\n\n"
 
         # B) 调用 LLM (注意：目前是阻塞的，用户需要等这里生成完)
+        # 一次性 complete，然后手动把 full_text 分小块 emit
         t2 = time.perf_counter()
         try:
             llm = LLMClient(provider=provider, model=model)
@@ -540,7 +545,7 @@ def explain_stream(req: ExplainRequest):
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 # ===== 新增：/index 重建 & 状态查询 =====
-
+# 使用 RQ (Redis Queue)。API 只负责 enqueue（入队）并返回一个 job_id，真交给后台 Worker 容器去干活
 class IndexRebuildRequest(BaseModel):
     chunks: str = "data/chunks_day2.jsonl"
     db: str = "data/chroma_db"
@@ -560,7 +565,8 @@ class IndexStatus(BaseModel):
     started_at: Optional[str] = None
     ended_at: Optional[str] = None
 
-
+# 接口职责：提交一个重建向量索引的 RQ 任务，立即返回一个 job_id
+# 真正的入库逻辑在 indexer/tasks.py 和 embed_ingest.py
 @app.post("/index/rebuild", response_model=IndexRebuildResponse)
 def index_rebuild(req: IndexRebuildRequest):
     job_id = enqueue_rebuild_embeddings(
@@ -572,7 +578,8 @@ def index_rebuild(req: IndexRebuildRequest):
     )
     return IndexRebuildResponse(job_id=job_id)
 
-
+# 用 RQ 的 Job.fetch 加 Redis 连接，查询当前 job 状态：
+# queued / started / finished / failed，还有 enqueue/start/end 时间戳。如果 job 找不到，返回 404。
 @app.get("/index/status/{job_id}", response_model=IndexStatus)
 def index_status(job_id: str):
     """
@@ -610,7 +617,6 @@ def agent_search_adapter(query: str, top_k: int = 6) -> List[Dict[str, Any]]:
 
     simplified: List[Dict[str, Any]] = []
     for r in results:
-        # 具体字段名请按你项目实际改，这里是按 /search 返回推的
         meta = r.get("metadata", {}) if isinstance(r, dict) else getattr(r, "metadata", {}) or {}
         simplified.append(
             {
