@@ -15,7 +15,7 @@ from typing import Any, Dict, List
 import chromadb
 from chromadb.config import Settings
 
-
+# 初始化一个 持久化 Chroma 客户端，指向向量库目录 ./data/chroma_db。 从里面拿到名为 "code_chunks" 的集合（就是 embed_ingest.py 写进去的那批 AST chunk）。
 class HybridSearcher:
     def __init__(
         self,
@@ -27,6 +27,7 @@ class HybridSearcher:
         )
         self.col = self.client.get_collection(collection_name)
 
+# 疑似函数名/类名”提取出来，可以专门加权这些字段
     @staticmethod
     def _extract_symbols(q: str) -> List[str]:
         backtick = re.findall(r"`([^`]+)`", q)
@@ -38,6 +39,7 @@ class HybridSearcher:
                 out.append(s2); seen.add(s2)
         return out
 
+# 避免search重复函数定义 只保留分数最高结果
     @staticmethod
     def _dedup_by_ast_path(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         best = {}
@@ -58,6 +60,7 @@ class HybridSearcher:
         assert isinstance(query, str) and query.strip(), "query 不能为空"
 
         # 1) 向量召回（由集合的 embedding function 自动对 query 嵌入）
+        # 用 Embedding 模型把用户的 Query 变成向量，去数据库里捞出 top_k * 2 个最相似的代码块（Candidate Generation）
         n_cand = min(top_k * 2, 100)
         hits = self.col.query(
             query_texts=[query],
@@ -81,6 +84,7 @@ class HybridSearcher:
             base_score = 1.0 / (1.0 + dist)
 
             # 2) 轻量符号加权：name 精确=1.0 / 包含=0.5；doc 出现=0.1
+            # 用正则 (re) 从 Query 里提取出像代码符号的单词（比如 CamelCase 或 snake_case）。拿着这些符号去匹配检索结果的 metadata['name']。
             sym_score = 0.0
             name = (meta.get("name") or "").lower()
             dlow = doc.lower()
@@ -111,7 +115,8 @@ class HybridSearcher:
         results = self._dedup_by_ast_path(results)
         results.sort(key=lambda x: x["score"], reverse=True)
         return results[:top_k]
-
+    
+# 被 /search/{symbol} 接口使用 vscode插件预留
     def search_by_symbol(self, symbol: str, top_k: int = 10) -> List[Dict[str, Any]]:
         sym = symbol.strip()
         if not sym:
