@@ -14,7 +14,7 @@ import chromadb
 from chromadb.config import Settings
 from chromadb.utils import embedding_functions  # 1.x：内置多种 embedding function
 
-
+# 一个小迭代器：按行读取 JSONL，不为空就 json.loads 成字典，yield 出去；run_ingest 里会用它顺序遍历所有 chunk。
 def iter_jsonl(path: pathlib.Path):
     with path.open("r", encoding="utf-8") as f:
         for line in f:

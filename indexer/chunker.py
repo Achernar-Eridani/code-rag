@@ -241,14 +241,14 @@ def chunk_file(repo_root: pathlib.Path, file_path: pathlib.Path) -> List[dict]:
             # 某些匿名情况（如 export default function () {}），这里可以选择跳过或给占位名
             # 为保证质量，Day2 先跳过匿名
             continue
-
+# 去重
         start = target.start_point[0] + 1
         end   = target.end_point[0] + 1
         dedup_key = (name, start, kind)
         if dedup_key in seen_keys:
             continue
         seen_keys.add(dedup_key)
-
+# 组装
         sig = extract_signature(target, src)
         doc = preceding_doc(target, src, comments)
         code_full = node_text(src, target)
@@ -267,7 +267,8 @@ def chunk_file(repo_root: pathlib.Path, file_path: pathlib.Path) -> List[dict]:
         }
         cid = stable_id(rel, kind, name, start, end)
         chunks.append({"id": cid, "text": text, "meta": meta})
-
+# 对单个 JS/TS 文件：用 tree-sitter 把所有函数/类/方法/变量函数抓出来
+# 对每个节点生成一个包含签名、注释、代码正文和丰富元数据的 chunk，输出为 {"id","text","meta"}
     return chunks
 
 def chunk_repo(repo_root: pathlib.Path, out_path: pathlib.Path) -> int:
