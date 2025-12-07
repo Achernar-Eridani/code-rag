@@ -42,7 +42,7 @@ curl -s -X POST "http://127.0.0.1:8000/index/rebuild" -H "Content-Type: applicat
 **然后查状态：**
 
 ```bash
-curl -s "http://127.0.0.1:8000/index/status/这里换成上面的job_id" | python -m json.tool
+curl -s "http://127.0.0.1:8000/index/status/fd709260-c52e-4c29-89be-ead884361e4e" | python -m json.tool
 ```
 
 看到：
@@ -58,7 +58,7 @@ curl -s "http://127.0.0.1:8000/index/status/这里换成上面的job_id" | pytho
 
 
 ```bash
-curl -s -X POST "http://127.0.0.1:8000/search" -H "Content-Type: application/json" -d '{"query":"hello world","top_k":3}' | python -m json.tool
+curl -s -X POST "http://127.0.0.1:8000/search" -H "Content-Type: application/json" -d '{"query":"explain this function baseIntersection","top_k":3}' | python -m json.tool
 ```
 
 或者
@@ -95,7 +95,7 @@ curl -s -X POST "http://127.0.0.1:8000/search" -H "Content-Type: application/jso
 
 
 
-curl -s -X POST "http://127.0.0.1:8000/explain" -H "Content-Type: application/json" -d '{"query":"explain this function","max_tokens":200}' | python -m json.tool
+curl -s -X POST "http://127.0.0.1:8000/explain" -H "Content-Type: application/json" -d '{"query":"explain this function baseIntersection","max_tokens":200}' | python -m json.tool
 
 
 ---
