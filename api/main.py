@@ -248,12 +248,12 @@ def build_context_blocks(results: List[dict], max_ctx_chars: int, max_chunk_char
 
 
 def build_fallback_answer(query: str, results: List[dict], max_items: int = 6) -> str:
-    lines = [f"(Fallback: LLM unavailable) Summary of "{query}" based on retrieval evidence:"]
+    lines = [f"（降级：LLM 不可用）基于检索证据对「{query}」的摘要："]
     for i, r in enumerate(results[:max_items], 1):
         m = r["metadata"]
         lines.append(
             f"- [#{i}] {m.get('kind','')} {m.get('name','')}  @ {m.get('path','')}  "
-            f"L{m.get('start_line',0)}-{m.get('end_line',0)}（score={r.get('score',0):.2f}）"
+            f"L{m.get('start_line',0)}-{m.get('end_line',0)}(score={r.get('score',0):.2f})"
         )
     lines.append("Note: To obtain natural language interpretation, please configure RAG_LLM_PROVIDER with the corresponding API/local model.")
     return "\n".join(lines)
