@@ -9625,7 +9625,7 @@ var require_get_intrinsic = __commonJS({
     var throwTypeError = function() {
       throw new $TypeError();
     };
-    var ThrowTypeError = $gOPD ? (function() {
+    var ThrowTypeError = $gOPD ? function() {
       try {
         arguments.callee;
         return throwTypeError;
@@ -9636,7 +9636,7 @@ var require_get_intrinsic = __commonJS({
           return throwTypeError;
         }
       }
-    })() : throwTypeError;
+    }() : throwTypeError;
     var hasSymbols = require_has_symbols()();
     var getProto = require_get_proto();
     var $ObjectGPO = require_Object_getPrototypeOf();
@@ -9900,7 +9900,7 @@ var require_get_intrinsic = __commonJS({
             if (!allowMissing) {
               throw new $TypeError("base intrinsic for " + name + " exists, but the property is not available.");
             }
-            return void undefined2;
+            return void 0;
           }
           if ($gOPD && i + 1 >= parts.length) {
             var desc = $gOPD(value, part);
@@ -12451,13 +12451,13 @@ var formDataToStream = (form, headersHandler, options) => {
     computedHeaders["Content-Length"] = contentLength;
   }
   headersHandler && headersHandler(computedHeaders);
-  return import_stream2.Readable.from((async function* () {
+  return import_stream2.Readable.from(async function* () {
     for (const part of parts) {
       yield boundaryBytes;
       yield* part.encode();
     }
     yield footerBytes;
-  })());
+  }());
 };
 var formDataToStream_default = formDataToStream;
 
@@ -14514,26 +14514,41 @@ function getCfg() {
     symbolBoost: cfg.get("symbolBoost") ?? 2,
     providerOverride: cfg.get("providerOverride") ?? "auto",
     maxTokens: cfg.get("maxTokens") ?? 600,
-    maxCtxChars: cfg.get("maxCtxChars") ?? 6e3
+    maxCtxChars: cfg.get("maxCtxChars") ?? 6e3,
+    // 新增：读取 API Key
+    apiKey: cfg.get("apiKey") ?? ""
   };
+}
+function buildHeaders() {
+  const { providerOverride, apiKey } = getCfg();
+  const headers = {};
+  if (providerOverride && providerOverride !== "auto") {
+    headers["x-llm-provider"] = providerOverride;
+  }
+  if (apiKey && apiKey.trim() !== "") {
+    headers["x-api-key"] = apiKey.trim();
+  }
+  return headers;
 }
 var client = null;
 function http2() {
   const { apiBase } = getCfg();
   if (!client) {
     client = axios_default.create({
-      baseURL: apiBase,
+      baseURL: apiBase.replace(/\/+$/, ""),
+      // 自动去掉结尾的 /
       timeout: 6e4
-      // 60s，兼容本地 LLM 慢一点
+      // 60s，兼容本地 LLM
     });
   } else {
-    client.defaults.baseURL = apiBase;
+    client.defaults.baseURL = apiBase.replace(/\/+$/, "");
   }
   return client;
 }
 async function ping() {
   try {
-    const res = await http2().get("/ping");
+    const headers = buildHeaders();
+    const res = await http2().get("/ping", { headers });
     return res.data;
   } catch {
     return { ok: false, provider: "offline", model: "offline" };
@@ -14541,24 +14556,38 @@ async function ping() {
 }
 async function search(query) {
   const { topK, symbolBoost } = getCfg();
-  const body = { query, top_k: topK, symbol_boost: symbolBoost };
-  const res = await http2().post("/search", body);
+  const headers = buildHeaders();
+  const body = {
+    query,
+    top_k: topK,
+    symbol_boost: symbolBoost
+  };
+  const res = await http2().post("/search", body, { headers });
   return res.data;
 }
 async function explain(query) {
-  const { topK, maxTokens, maxCtxChars, providerOverride } = getCfg();
-  const body = { query, top_k: topK, max_tokens: maxTokens, max_ctx_chars: maxCtxChars };
-  if (providerOverride && providerOverride !== "auto") body.provider = providerOverride;
-  const res = await http2().post("/explain", body);
+  const { topK, maxTokens, maxCtxChars } = getCfg();
+  const headers = buildHeaders();
+  const body = {
+    query,
+    top_k: topK,
+    max_tokens: maxTokens,
+    max_ctx_chars: maxCtxChars
+    // 注意：不再需要在 body 里传 provider，改走 headers
+  };
+  const res = await http2().post("/explain", body, { headers });
   return res.data;
 }
 function friendlyError(e) {
   if (axios_default.isAxiosError(e)) {
     const code = e.response?.status;
     const data = e.response?.data;
-    if (code && data) return `API ${code}: ${typeof data === "string" ? data : JSON.stringify(data)}`;
-    if (e.code === "ECONNREFUSED") return "Cannot connect to RAG API (connection refused).";
-    if (e.code === "ECONNABORTED") return "RAG API timeout.";
+    if (code && data) {
+      const msg = typeof data === "string" ? data : data.detail || JSON.stringify(data);
+      return `API ${code}: ${msg}`;
+    }
+    if (e.code === "ECONNREFUSED") return "Cannot connect to RAG API (connection refused). Is Docker running?";
+    if (e.code === "ECONNABORTED") return "RAG API timeout (backend took too long).";
   }
   return e?.message || String(e);
 }
@@ -14749,32 +14778,38 @@ function markdownToHtml(md) {
 }
 
 // src/extension.ts
-async function activate(context) {
-  const status = vscode5.window.createStatusBarItem(vscode5.StatusBarAlignment.Left, 100);
-  status.text = "RAG: ready";
-  status.show();
-  context.subscriptions.push(status);
+var statusBarItem;
+function activate(context) {
+  statusBarItem = vscode5.window.createStatusBarItem(vscode5.StatusBarAlignment.Left, 100);
+  statusBarItem.text = "RAG: ready";
+  statusBarItem.show();
+  context.subscriptions.push(statusBarItem);
   const tree = new SearchTreeProvider();
   const treeView = vscode5.window.createTreeView("ragSearchView", { treeDataProvider: tree });
   context.subscriptions.push(treeView);
   registerSearchOpenCommand(context);
-  const info = await ping();
-  status.text = info.ok ? `RAG: ${info.provider} \xB7 ${info.model}` : "RAG: offline";
+  context.subscriptions.push(
+    vscode5.workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration("rag")) {
+        refreshStatusBar();
+      }
+    })
+  );
+  refreshStatusBar();
   context.subscriptions.push(vscode5.commands.registerCommand("rag.search", async () => {
     const editor = vscode5.window.activeTextEditor;
     const sel = editor?.document.getText(editor.selection) || "";
     const q = await vscode5.window.showInputBox({ title: "RAG: Search Code", value: sel, prompt: "Enter your search query" });
     if (!q) return;
     try {
-      status.text = "RAG: searching\u2026";
+      statusBarItem.text = "$(sync~spin) RAG: searching...";
       const res = await search(q);
       tree.refresh(res.results || []);
       vscode5.window.showInformationMessage(`Found ${res.total} results.`);
     } catch (e) {
       vscode5.window.showErrorMessage(`Search failed: ${friendlyError(e)}`);
     } finally {
-      const info2 = await ping();
-      status.text = info2.ok ? `RAG: ${info2.provider} \xB7 ${info2.model}` : "RAG: offline";
+      await refreshStatusBar();
     }
   }));
   context.subscriptions.push(vscode5.commands.registerCommand("rag.explain", async () => {
@@ -14783,18 +14818,31 @@ async function activate(context) {
     const q = await vscode5.window.showInputBox({ title: "RAG: Explain Selection", value: sel, prompt: "Enter a question about current code" });
     if (!q) return;
     try {
-      status.text = "RAG: explaining\u2026";
+      statusBarItem.text = "$(sync~spin) RAG: explaining...";
       const resp = await explain(q);
       ExplainPanel.show(context, resp);
     } catch (e) {
       vscode5.window.showErrorMessage(`Explain failed: ${friendlyError(e)}`);
     } finally {
-      const info2 = await ping();
-      status.text = info2.ok ? `RAG: ${info2.provider} \xB7 ${info2.model}` : "RAG: offline";
+      await refreshStatusBar();
     }
   }));
 }
 function deactivate() {
+}
+async function refreshStatusBar() {
+  try {
+    const info = await ping();
+    if (info.ok) {
+      statusBarItem.text = `$(check) RAG: ${info.provider} \xB7 ${info.model}`;
+      statusBarItem.tooltip = "Code RAG Service is Online";
+    } else {
+      statusBarItem.text = "$(error) RAG: offline";
+      statusBarItem.tooltip = "Cannot connect to RAG API";
+    }
+  } catch (e) {
+    statusBarItem.text = "$(error) RAG: offline";
+  }
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {

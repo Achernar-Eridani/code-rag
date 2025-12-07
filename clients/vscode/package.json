@@ -20,6 +20,12 @@
       "type": "object",
       "title": "Code RAG Assistant",
       "properties": {
+        "rag.apiKey": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Optional LLM API key. If set, it will be sent as the `x-api-key` header so the backend can override env-based keys.",
+          "scope": "application"
+        },
         "rag.apiBase": {
           "type": "string",
           "default": "http://127.0.0.1:8000",
