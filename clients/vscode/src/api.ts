@@ -4,6 +4,25 @@ import * as vscode from "vscode";
 // =============================================================================
 //  Types (原有的定义)
 // =============================================================================
+// Agent tools
+export type AgentToolResult = {
+  path?: string;
+  symbol?: string;
+  kind?: string;
+  start_line?: number;
+  end_line?: number;
+  score?: number;
+  code?: string;
+};
+
+export type AgentExplainResponse = {
+  query: string;
+  answer: string;
+  used_tool?: string | null;
+  tool_input?: Record<string, any> | null;
+  tool_results?: AgentToolResult[] | null;
+};
+
 
 export type SearchItem = {
   id: string;
@@ -149,6 +168,20 @@ export async function explain(query: string): Promise<ExplainResponse> {
   const res = await http().post<ExplainResponse>("/explain", body, { headers });
   return res.data;
 }
+
+export async function agentExplain(query: string): Promise<AgentExplainResponse> {
+  const { maxTokens } = getCfg();
+  const headers = buildHeaders();
+
+  const body = {
+    query,
+    max_tokens: maxTokens,
+  };
+
+  const res = await http().post<AgentExplainResponse>("/agent/explain", body, { headers });
+  return res.data;
+}
+
 
 export function friendlyError(e: any): string {
   if (axios.isAxiosError(e)) {

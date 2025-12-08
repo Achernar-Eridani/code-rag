@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { ping, search, explain, friendlyError, SearchResponse } from "./api";
+import { ping, search, explain, agentExplain, friendlyError, SearchResponse } from "./api";
 import { SearchTreeProvider, registerSearchOpenCommand } from "./searchView";
 import { ExplainPanel } from "./explainPanel";
 
@@ -67,7 +67,31 @@ export function activate(context: vscode.ExtensionContext) {
     } finally {
       await refreshStatusBar();
     }
-  }));
+  }))
+    // --- Command: Ask Code Agent ---
+  context.subscriptions.push(
+    vscode.commands.registerCommand("rag.agentExplain", async () => {
+      const editor = vscode.window.activeTextEditor;
+      const sel = editor?.document.getText(editor.selection) || "";
+
+      const q = await vscode.window.showInputBox({
+        title: "RAG Agent: Ask Code Agent",
+        value: sel,
+        prompt: "Ask anything about this repo or your code. Agent will decide whether to search.",
+      });
+      if (!q) return;
+
+      try {
+        statusBarItem.text = "$(sync~spin) RAG: agent thinking...";
+        const resp = await agentExplain(q);
+        ExplainPanel.showAgent(context, resp);
+      } catch (e: any) {
+        vscode.window.showErrorMessage(`Code Agent failed: ${friendlyError(e)}`);
+      } finally {
+        await refreshStatusBar();
+      }
+    })
+  );
 }
 
 export function deactivate() {}

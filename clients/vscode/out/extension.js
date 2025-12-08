@@ -14578,6 +14578,16 @@ async function explain(query) {
   const res = await http2().post("/explain", body, { headers });
   return res.data;
 }
+async function agentExplain(query) {
+  const { maxTokens } = getCfg();
+  const headers = buildHeaders();
+  const body = {
+    query,
+    max_tokens: maxTokens
+  };
+  const res = await http2().post("/agent/explain", body, { headers });
+  return res.data;
+}
 function friendlyError(e) {
   if (axios_default.isAxiosError(e)) {
     const code = e.response?.status;
@@ -14684,20 +14694,48 @@ var ExplainPanel = class _ExplainPanel {
   static {
     this.current = null;
   }
+  // ===========================================================================
+  //  Static Methods (Entry Points)
+  // ===========================================================================
+  /**
+   * 模式 1：普通 Explain 展示
+   */
   static show(ctx, resp) {
     if (_ExplainPanel.current) {
-      _ExplainPanel.current.update(resp);
+      _ExplainPanel.current.renderExplain(resp);
+      _ExplainPanel.current.panel.reveal(vscode4.ViewColumn.Beside);
       return;
     }
-    const panel = vscode4.window.createWebviewPanel(
+    const panel = _ExplainPanel.createPanel(ctx);
+    _ExplainPanel.current = new _ExplainPanel(panel, ctx);
+    _ExplainPanel.current.renderExplain(resp);
+  }
+  /**
+   * 模式 2：Agent 展示 (新增)
+   */
+  static showAgent(ctx, resp) {
+    if (_ExplainPanel.current) {
+      _ExplainPanel.current.renderAgent(resp);
+      _ExplainPanel.current.panel.reveal(vscode4.ViewColumn.Beside);
+      return;
+    }
+    const panel = _ExplainPanel.createPanel(ctx);
+    _ExplainPanel.current = new _ExplainPanel(panel, ctx);
+    _ExplainPanel.current.renderAgent(resp);
+  }
+  // ===========================================================================
+  //  Private / Instance Methods
+  // ===========================================================================
+  static createPanel(ctx) {
+    return vscode4.window.createWebviewPanel(
       "ragExplain",
       "RAG Explain",
       vscode4.ViewColumn.Beside,
       { enableScripts: true, retainContextWhenHidden: true }
     );
-    _ExplainPanel.current = new _ExplainPanel(panel, ctx, resp);
   }
-  constructor(panel, ctx, resp) {
+  // 构造函数现在只负责绑定事件，不负责初始渲染
+  constructor(panel, ctx) {
     this.panel = panel;
     this.panel.onDidDispose(() => {
       _ExplainPanel.current = null;
@@ -14705,66 +14743,128 @@ var ExplainPanel = class _ExplainPanel {
     this.panel.webview.onDidReceiveMessage(async (msg) => {
       if (msg?.command === "open") {
         const { path: path2, start, end } = msg;
-        await vscode4.commands.executeCommand("rag.openSearchTarget", path2, start, end);
+        await vscode4.commands.executeCommand(
+          "rag.openSearchTarget",
+          path2,
+          start,
+          end
+        );
       }
     });
-    this.update(resp);
   }
-  update(resp) {
+  /**
+   * 渲染普通 Explain 结果 (原 update 方法改造)
+   */
+  renderExplain(resp) {
     const warn = resp.answer.trim().startsWith("\uFF08\u964D\u7EA7\uFF1ALLM \u4E0D\u53EF\u7528\uFF09");
-    const header = `**Provider**: \`${resp.provider}\`  \xB7  **Model**: \`${resp.model}\`  \xB7  **Latency**: retrieval ${resp.timings_ms?.retrieval ?? 0} ms / gen ${resp.timings_ms?.generation ?? 0} ms`;
+    const header = `**Provider**: \`${resp.provider}\` \xB7 **Model**: \`${resp.model}\` \xB7 **Latency**: retrieval ${resp.timings_ms?.retrieval ?? 0} ms / gen ${resp.timings_ms?.generation ?? 0} ms`;
     const evidences = (resp.evidences || []).map((e, idx) => {
       const label = `[#${idx + 1}] ${e.kind} ${e.name} @ ${e.path} L${e.start_line}-${e.end_line}`;
-      return `<li>${escapeHtml(label)} <button data-idx="${idx}">Open</button></li>`;
+      const evt = { path: e.path, start: e.start_line, end: e.end_line };
+      const evtJson = JSON.stringify(evt).replace(/"/g, "&quot;");
+      return `<li>${escapeHtml(label)} <button data-evt="${evtJson}">Open</button></li>`;
     }).join("");
-    const html = `
-      <!DOCTYPE html>
+    const bodyHtml = `
+      ${warn ? `<div class="warn">No LLM output \u2013 showing evidence summary returned by backend.</div>` : ``}
+      <div class="muted">${header}</div>
+      <h2>Answer</h2>
+      <div class="markdown-body">${markdownToHtml(resp.answer)}</div>
+      <h2>Evidences</h2>
+      <ul>${evidences}</ul>
+    `;
+    this.panel.webview.html = this.getHtmlWrapper(bodyHtml);
+  }
+  /**
+   * 渲染 Agent 结果 (新增)
+   */
+  renderAgent(resp) {
+    const headerParts = [];
+    if (resp.used_tool) {
+      headerParts.push(`Used tool: \`${resp.used_tool}\``);
+    } else {
+      headerParts.push("Used tool: none (pure LLM answer)");
+    }
+    const header = headerParts.join(" \xB7 ");
+    const toolInputHtml = resp.tool_input ? `<pre>${escapeHtml(JSON.stringify(resp.tool_input, null, 2))}</pre>` : `<div class="muted">No tool input.</div>`;
+    const toolResults = resp.tool_results ?? [];
+    const toolResultsHtml = toolResults.length > 0 ? toolResults.map((e, idx) => {
+      const label = `[#${idx + 1}] ${e.kind ?? ""} ${e.symbol ?? ""} @ ${e.path ?? ""} L${e.start_line ?? 0}-${e.end_line ?? 0} (score=${e.score ?? "N/A"})`;
+      const evt = {
+        path: e.path,
+        start: e.start_line,
+        end: e.end_line
+      };
+      const evtJson = JSON.stringify(evt).replace(/"/g, "&quot;");
+      return `<li>${escapeHtml(label)} <button data-evt="${evtJson}">Open</button></li>`;
+    }).join("") : `<li class="muted">No tool results.</li>`;
+    const bodyHtml = `
+      <div class="query-box">Agent Q: ${escapeHtml(resp.query)}</div>
+
+      <div class="muted">${header}</div>
+
+      <h2>Agent Answer</h2>
+      <div class="markdown-body">${markdownToHtml(resp.answer)}</div>
+
+      <h2>Tool Input</h2>
+      ${toolInputHtml}
+
+      <h2>Tool Results</h2>
+      <ul>${toolResultsHtml}</ul>
+    `;
+    this.panel.webview.html = this.getHtmlWrapper(bodyHtml);
+  }
+  /**
+   * 通用 HTML 包装器 (包含 CSS 和 全局点击监听)
+   */
+  getHtmlWrapper(bodyContent) {
+    return `<!DOCTYPE html>
       <html>
       <head>
         <meta charset="UTF-8" />
         <style>
-          body { font-family: -apple-system, Segoe UI, system-ui, sans-serif; padding: 12px; }
-          .warn { background: #fff3cd; border: 1px solid #ffeeba; padding: 8px 12px; margin-bottom: 10px; }
+          body { font-family: -apple-system, Segoe UI, system-ui, sans-serif; padding: 12px; line-height: 1.5; }
+          .warn { background: #fff3cd; border: 1px solid #ffeeba; padding: 8px 12px; margin-bottom: 10px; border-radius: 4px; }
           .muted { color: #666; font-size: 12px; }
-          h2 { margin: 8px 0 6px; }
-          pre { background: #f6f8fa; padding: 8px; overflow: auto; }
+          .query-box { background: #f0f0f0; padding: 8px; border-radius: 4px; margin-bottom: 12px; font-style: italic; color: #333; }
+          h2 { margin: 16px 0 8px; font-size: 16px; border-bottom: 1px solid #eee; padding-bottom: 4px; }
+          pre { background: #f6f8fa; padding: 8px; overflow: auto; border-radius: 4px; }
+          code { font-family: Consolas, "Courier New", monospace; background: #f6f8fa; padding: 2px 4px; border-radius: 3px; }
           ul { padding-left: 18px; }
-          button { margin-left: 8px; }
+          li { margin-bottom: 4px; }
+          button { margin-left: 8px; cursor: pointer; padding: 2px 6px; }
+          
+          /* \u7B80\u5355\u7684 Markdown \u6837\u5F0F */
+          .markdown-body p { margin-bottom: 8px; }
+          .markdown-body ul { margin-bottom: 8px; }
         </style>
       </head>
       <body>
-        ${warn ? `<div class="warn">No LLM output \u2013 showing evidence summary returned by backend.</div>` : ``}
-        <div class="muted">${header}</div>
-        <h2>Answer</h2>
-        <div>${markdownToHtml(resp.answer)}</div>
-        <h2>Evidences</h2>
-        <ul id="ev">${evidences}</ul>
+        ${bodyContent}
 
         <script>
           const vscode = acquireVsCodeApi();
-          document.getElementById("ev")?.addEventListener("click", (e) => {
-            const t = e.target;
-            if (t && t.tagName === "BUTTON") {
-              const idx = t.getAttribute("data-idx");
+
+          // \u5168\u5C40\u76D1\u542C\u70B9\u51FB\u4E8B\u4EF6
+          document.addEventListener("click", (e) => {
+            if (e.target && e.target.tagName === "BUTTON") {
               try {
-                const data = ${JSON.stringify(resp.evidences || [])};
-                const ev = data[Number(idx)];
-                if (ev) vscode.postMessage({ command: "open", path: ev.path, start: ev.start_line, end: ev.end_line });
+                // \u8BFB\u53D6\u6309\u94AE\u4E0A\u7684 JSON \u6570\u636E
+                const data = JSON.parse(e.target.getAttribute("data-evt"));
+                // \u53D1\u9001\u7ED9 extension
+                vscode.postMessage({ command: "open", ...data });
               } catch (_) {}
             }
           });
         </script>
       </body>
-      </html>
-    `;
-    this.panel.webview.html = html;
+      </html>`;
   }
 };
 function escapeHtml(s) {
-  return s.replace(/[&<>"']/g, (m) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[m]);
+  return (s || "").replace(/[&<>"']/g, (m) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[m]);
 }
 function markdownToHtml(md) {
-  let s = md;
+  let s = md || "";
   s = s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   s = s.replace(/```([\s\S]*?)```/g, (_m, code) => `<pre><code>${code}</code></pre>`);
   s = s.replace(/^### (.*)$/gm, "<h3>$1</h3>");
@@ -14827,6 +14927,27 @@ function activate(context) {
       await refreshStatusBar();
     }
   }));
+  context.subscriptions.push(
+    vscode5.commands.registerCommand("rag.agentExplain", async () => {
+      const editor = vscode5.window.activeTextEditor;
+      const sel = editor?.document.getText(editor.selection) || "";
+      const q = await vscode5.window.showInputBox({
+        title: "RAG Agent: Ask Code Agent",
+        value: sel,
+        prompt: "Ask anything about this repo or your code. Agent will decide whether to search."
+      });
+      if (!q) return;
+      try {
+        statusBarItem.text = "$(sync~spin) RAG: agent thinking...";
+        const resp = await agentExplain(q);
+        ExplainPanel.showAgent(context, resp);
+      } catch (e) {
+        vscode5.window.showErrorMessage(`Code Agent failed: ${friendlyError(e)}`);
+      } finally {
+        await refreshStatusBar();
+      }
+    })
+  );
 }
 function deactivate() {
 }

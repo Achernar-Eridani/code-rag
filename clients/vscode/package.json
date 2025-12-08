@@ -7,15 +7,19 @@
   "engines": { "vscode": "^1.84.0" },
   "categories": ["Other"],
   "activationEvents": [
-    "onCommand:rag.search",
-    "onCommand:rag.explain"
-  ],
+  "onCommand:rag.search",
+  "onCommand:rag.explain",
+  "onCommand:rag.agentExplain"
+],
+
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
       { "command": "rag.search", "title": "RAG: Search Code" },
-      { "command": "rag.explain", "title": "RAG: Explain Selection" }
+      { "command": "rag.explain", "title": "RAG: Explain Selection" },
+      { "command": "rag.agentExplain", "title": "RAG: Ask Code Agent" }
     ],
+
     "configuration": {
       "type": "object",
       "title": "Code RAG Assistant",
