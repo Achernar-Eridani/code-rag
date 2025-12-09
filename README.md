@@ -1,117 +1,48 @@
-# Code-RAG MVP
-MVP finished, SSE, Redis, RQ finished
-Working on Agent
-docker compose up -d --build
-curl http://127.0.0.1:8000/ping
+# CodeRAG Agent – AST 感知代码智能助手
 
+一个面向开发者的本地代码理解与检索助手，基于 AST 感知 RAG + Code Agent，
+在 VS Code 中提供「选中代码一键解释」「代码检索」「Agent 问答」能力。
 
-第 0 步：健康检查 `/ping`
-
-```bash
-curl -s http://127.0.0.1:8000/ping | python -m json.tool
-```
-
-预期：
-
-
-{
-  "ok": true,
-  "provider": "openai",
-  "model": "gpt-4o-mini"
-}
-
+后端使用 FastAPI + Tree-sitter + ChromaDB + Redis + RQ + Docker Compose，
+前端以 VS Code 扩展形式集成到日常开发工作流中。
 
 ---
 
-第 1 步：重建索引 `/index/rebuild` + `/index/status`
+## ✨ 功能特性
 
-**提交重建任务：**
+- **AST 感知检索（RAG）**
+  - 使用 Tree-sitter 将代码按函数 / 类 / 模块粒度切片，
+  - 结合向量检索与符号名 / 文件路径等元信息做混合召回，
+  - 支持跨文件、跨模块检索相关代码片段。
 
-```bash
-curl -s -X POST "http://127.0.0.1:8000/index/rebuild" -H "Content-Type: application/json" -d '{"chunks":"data/chunks_day2.jsonl","db":"data/chroma_db","collection":"code_chunks","batch_size":100,"fresh":true}' | python -m json.tool
-```
+- **代码 Explain（选中一键解释）**
+  - 在编辑器中选中任意代码，执行 `RAG: Explain Selection`，
+  - 自动检索相关定义 / 调用位置，
+  - 以带引用的形式解释「这段代码做什么」「如何使用」。
 
-会返回：
+- **Code Agent 模式**
+  - 命令：`RAG: Ask Code Agent`，
+  - Agent 会按需调用代码检索等工具，自主决定是否搜索、搜索什么，
+  - 面板中展示 Agent 的最终回答 + 工具调用参数 + 实际参考的代码片段列表。
 
-```json
-{
-  "job_id": "xxxx-xxxx-..."
-}
-```
-
-**然后查状态：**
-
-```bash
-curl -s "http://127.0.0.1:8000/index/status/fd709260-c52e-4c29-89be-ead884361e4e" | python -m json.tool
-```
-
-看到：
-
-```json
-"status": "finished"
-```
-
+- **本地优先 & 可私有化部署**
+  - 提供标准 `docker-compose.yml`，
+  - 一行命令拉起 API Server、向量库、Redis / RQ Worker 以及本地 LLM（可选），
+  - 支持在本地或公司内网中私有化部署。
 
 ---
 
-第 2 步：基础 RAG `/search`
+## 🧱 安装与前置依赖
 
+### 1. 安装后端服务
 
-```bash
-curl -s -X POST "http://127.0.0.1:8000/search" -H "Content-Type: application/json" -d '{"query":"explain this function baseIntersection","top_k":3}' | python -m json.tool
-```
-
-或者
+> 需要本机安装好 [Docker](https://www.docker.com/)。
 
 ```bash
-curl -s -X POST "http://127.0.0.1:8000/search" -H "Content-Type: application/json" -d '{"query":"function","top_k":3}' | python -m json.tool
+git clone https://github.com/yourname/coderag-agent.git
+cd coderag-agent
 
+cp .env.example .env
+# 在 .env 中填入必要配置，例如 OPENAI_API_KEY / 默认 provider 等
 
-返回类似
-
-{
-  "query": "function",
-  "total": 3,
-  "results": [
-    {
-      "id": "...",
-      "score": 0.98,
-      "name": "xxx",
-      "kind": "function",
-      "path": "src/xxx.ts",
-      "start_line": 10,
-      "end_line": 40,
-      "text_preview": "..."
-    },
-    ...
-  ]
-}
-
-
-
----
-
-### 第 3 步：Explain `/explain`
-
-
-
-curl -s -X POST "http://127.0.0.1:8000/explain" -H "Content-Type: application/json" -d '{"query":"explain this function baseIntersection","max_tokens":200}' | python -m json.tool
-
-
----
-
-第 4 步：Agent `/agent/explain`
-
-
-```bash
-curl -s -X POST "http://127.0.0.1:8000/agent/explain" -H "Content-Type: application/json" -d '{"query":"please explain a function from this codebase"}' | python -m json.tool
-```
-
-返回：
-
-* `answer`: 一段文字
-* `used_tool`: 有可能是 `"search_code"` 或 `null`
-* `tool_results`: 如果调了工具，就会有几条 chunk 简略信息
-
-
-
+docker compose up -d
