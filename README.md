@@ -39,7 +39,7 @@
 > 需要本机安装好 [Docker](https://www.docker.com/)。
 
 ```bash
-git clone https://github.com/yourname/coderag-agent.git
+git clone https://github.com/Achernar-Eridani/code-rag
 cd coderag-agent
 
 cp .env.example .env
