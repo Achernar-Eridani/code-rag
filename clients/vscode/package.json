@@ -1,25 +1,57 @@
 {
   "name": "code-rag-assistant",
-  "displayName": "Code RAG Assistant (MVP)",
-  "description": "Search & Explain your code via local RAG backend (/search, /explain).",
+  "displayName": "Code RAG Agent",
+  "description": "Your local AI coding assistant with AST-aware search & autonomous agent capabilities.",
   "version": "0.1.0",
-  "publisher": "your-publisher-id",
-  "engines": { "vscode": "^1.84.0" },
-  "categories": ["Other"],
+  "publisher": "myshkin451",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Achernar-Eridani/code-rag"
+  },
+  "license": "MIT",
+  "icon": "images/icon.png",
+  "engines": {
+    "vscode": "^1.84.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Machine Learning",
+    "Education"
+  ],
+  "keywords": [
+    "RAG",
+    "LLM",
+    "Agent",
+    "Code Search",
+    "OpenAI",
+    "Local LLM"
+  ],
+  "galleryBanner": {
+    "color": "#1e293b",
+    "theme": "dark"
+  },
   "activationEvents": [
-  "onCommand:rag.search",
-  "onCommand:rag.explain",
-  "onCommand:rag.agentExplain"
-],
-
+    "onCommand:rag.search",
+    "onCommand:rag.explain",
+    "onCommand:rag.agentExplain",
+    "onView:ragSearchView"
+  ],
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
-      { "command": "rag.search", "title": "RAG: Search Code" },
-      { "command": "rag.explain", "title": "RAG: Explain Selection" },
-      { "command": "rag.agentExplain", "title": "RAG: Ask Code Agent" }
+      {
+        "command": "rag.search",
+        "title": "RAG: Search Code"
+      },
+      {
+        "command": "rag.explain",
+        "title": "RAG: Explain Selection"
+      },
+      {
+        "command": "rag.agentExplain",
+        "title": "RAG: Ask Code Agent"
+      }
     ],
-
     "configuration": {
       "type": "object",
       "title": "Code RAG Assistant",
@@ -27,7 +59,7 @@
         "rag.apiKey": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Optional LLM API key. If set, it will be sent as the `x-api-key` header so the backend can override env-based keys.",
+          "markdownDescription": "Optional LLM API key. If set, it will be sent as the `x-api-key` header.",
           "scope": "application"
         },
         "rag.apiBase": {
@@ -47,7 +79,12 @@
         },
         "rag.providerOverride": {
           "type": "string",
-          "enum": ["auto", "openai", "local", "qwen_api"],
+          "enum": [
+            "auto",
+            "openai",
+            "local",
+            "qwen_api"
+          ],
           "default": "auto",
           "description": "Force provider for /explain (auto uses backend default)."
         },
