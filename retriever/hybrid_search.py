@@ -4,6 +4,7 @@
 - 封装 ChromaDB 的 query 调用
 - 实现 Hybrid 策略：Semantic Score + Symbol Boost
 - 支持动态 Collection 切换 (Workspace Isolation)
+- 增加运行时代码优先策略 (Source Boosting)
 """
 
 import chromadb
@@ -66,9 +67,6 @@ class HybridSearcher:
             return []
 
         # 2. 结果展开 & 初始打分
-        # Chroma distance 是 欧氏距离? 余弦距离? 默认 L2 (squared Euclidean) -> distance越小越好
-        # 转换 score = 1 / (1 + distance) 或者 1 - distance (如果 cosine)
-        # 这里假设 distance 是 L2，范围 [0, +inf)
         ids = results["ids"][0]
         dists = results["distances"][0]
         metas = results["metadatas"][0]
@@ -92,26 +90,35 @@ class HybridSearcher:
             })
 
         # 3. 符号/路径 增强 (Re-rank)
-        # 简单策略：如果 query 包含 meta['name']，加分
         q_lower = query.lower()
         
         final_list = []
         for cand in candidates:
             m = cand["metadata"]
             name = str(m.get("name", "")).lower()
-            ast_path = str(m.get("ast_path", "")).lower()
+            path = str(m.get("path", "")).lower()
             
             boost = 1.0
-            # A. 精确匹配函数名
+            
+            # A. 路径权重策略 (Source Boosting)
+            # 惩罚测试文件和类型定义 (以防万一它们还在索引里)
+            if "/test/" in path or "/tests/" in path or "/spec/" in path or "/__tests__/" in path:
+                boost *= 0.1  # 打入冷宫
+            elif path.endswith(".d.ts"):
+                boost *= 0.1
+            # 奖励核心源码目录
+            elif "/src/" in path or "/lib/" in path:
+                boost *= 1.2
+            
+            # B. 精确匹配函数名 (Symbol Boost)
             if name and name in q_lower:
                  boost *= symbol_boost
             
-            # B. 路径关键匹配 (可选)
-            # if "controller" in q_lower and "controller" in ast_path:
-            #     boost *= 1.2
-            
             cand["score"] *= boost
-            final_list.append(cand)
+            
+            # 简单的阈值过滤，分数太低就不要了
+            if cand["score"] > 0.01:
+                final_list.append(cand)
 
         # 4. 排序 & 截断
         final_list.sort(key=lambda x: x["score"], reverse=True)

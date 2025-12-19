@@ -12,6 +12,21 @@ from ai.tools import AGENT_TOOLS
 # search_func: (query, top_k) -> List[Dict]
 SearchFunc = Callable[[str, int], List[Dict[str, Any]]]
 
+# 更加严格的 System Prompt，防止幻觉
+AGENT_SYSTEM_PROMPT = """You are a senior code architect expert. 
+Your goal is to answer user questions based STRICTLY on the provided code evidence.
+
+Guideline:
+1. Search Strategy: When searching for implementation details, use precise keywords like "function name" or "class name" rather than abstract concepts. 
+   - BAD: "adapter selection"
+   - GOOD: "getAdapter", "dispatchRequest", "adapter"
+2. Evidence Handling: 
+   - Prioritize runtime code (src/, lib/) over tests (test/, spec/).
+   - If the search results contain only tests or .d.ts files, state clearly that you cannot find the runtime implementation.
+   - Do NOT hallucinate code or file paths. If it's not in the tool results, it doesn't exist.
+3. Citation: You must cite the evidence using [#id] format at the end of relevant sentences.
+"""
+
 # 由于使用openai function calling, 目前只能用在openai api
 def _get_openai_client() -> OpenAI:
     api_key = os.getenv("OPENAI_API_KEY")
@@ -30,7 +45,8 @@ def run_code_agent(
     最小可用 Code Agent：
     1. 先让 LLM 决定要不要调用工具（search_code）
     2. 如果调用工具，则执行 search_func 获取代码片段
-    3. 再让 LLM 基于代码片段 + 问题给出最终回答
+    3. (New) 证据守门人：过滤掉 test/d.ts 等噪音，如果没有有效证据直接返回 Not Sure
+    4. 再让 LLM 基于代码片段 + 问题给出最终回答
 
     返回：
         answer: 最终回答（字符串）
@@ -43,13 +59,7 @@ def run_code_agent(
     messages: List[Dict[str, Any]] = [
         {
             "role": "system",
-            "content": (
-                "You are a code review and explanation assistant for a codebase "
-                "indexed by an AST-aware code search engine. "
-                "When the user asks about specific code behavior, implementation, "
-                "or how something works, you should usually call tools to search code. "
-                "When the question is general (e.g. greetings), you can answer directly."
-            ),
+            "content": AGENT_SYSTEM_PROMPT,
         },
         {
             "role": "user",
@@ -86,9 +96,8 @@ def run_code_agent(
     except json.JSONDecodeError:
         fn_args = {}
 
-    # 3) 执行工具逻辑（目前只支持 search_code）
+    # 3) 执行工具逻辑
     if fn_name != "search_code":
-        # 未知工具，降级为直接回答
         return msg.content or "", debug
 
     search_query = fn_args.get("query") or user_query
@@ -97,10 +106,39 @@ def run_code_agent(
     debug["used_tool"] = "search_code"
     debug["tool_input"] = {"query": search_query, "top_k": top_k}
 
-    code_results = search_func(search_query, top_k=top_k)
-    debug["tool_results"] = code_results
+    # 获取原始检索结果
+    raw_results = search_func(search_query, top_k=top_k)
+    debug["tool_results"] = raw_results # 调试信息保留原始全量结果
 
-    # 把工具调用的决定写回 messages（OpenAI 要求）
+    # --- 核心改进：证据守门人 (Evidence Gatekeeper) ---
+    valid_evidence = []
+    skipped_count = 0
+    
+    for res in raw_results:
+        path = str(res.get("path", "")).lower()
+        # 严格过滤：跳过测试文件和类型定义
+        if ("/test/" in path or "/tests/" in path or "/spec/" in path or 
+            "/__tests__/" in path or path.endswith(".d.ts")):
+            skipped_count += 1
+            continue
+        valid_evidence.append(res)
+    
+    # 情况 A: 搜到了结果，但全被过滤掉了 (全是测试代码)
+    if not valid_evidence and raw_results:
+        return (
+            f"I searched for '{search_query}' but only found test files or type definitions (filtered {skipped_count} results). "
+            "I cannot provide a definitive answer based on runtime source code.",
+            debug
+        )
+    
+    # 情况 B: 根本没搜到
+    if not raw_results:
+        # 让 LLM 自己处理 "没找到" 的情况，或者直接这里拦截
+        pass 
+
+    # 4) 第二轮：只把 valid_evidence 喂给 LLM
+    # 这样 LLM 根本看不到测试代码，就不会被误导
+    
     messages.append(
         {
             "role": "assistant",
@@ -118,22 +156,20 @@ def run_code_agent(
         }
     )
 
-    # 把工具的输出作为 tool role 加入对话
     messages.append(
         {
             "role": "tool",
             "tool_call_id": tool_call.id,
             "name": fn_name,
-            # 注意：这里把检索结果序列化成 JSON 字符串给模型看
-            "content": json.dumps(code_results, ensure_ascii=False),
+            # 关键：喂给模型的是过滤后的干净数据
+            "content": json.dumps(valid_evidence, ensure_ascii=False),
         }
     )
 
-    # 4) 第二轮：基于代码结果给出最终回答
     second = client.chat.completions.create(
         model=model,
         messages=messages,
-        temperature=0.2,
+        temperature=0.2, # 低温，减少胡编
         max_tokens=max_tokens,
     )
     final_msg = second.choices[0].message

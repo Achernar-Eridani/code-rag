@@ -28,6 +28,19 @@ EXT2LANG = {
 }
 SUPPORTED_EXTS = set(EXT2LANG.keys())
 
+# --- 新增：过滤规则 ---
+# 忽略的目录名（全匹配）
+IGNORE_DIRS = {
+    "node_modules", "dist", "build", ".git", "coverage", 
+    "test", "tests", "__tests__", "spec", "specs", "e2e", 
+    ".vscode", ".idea", ".github"
+}
+# 忽略的文件后缀（endsWith 匹配）
+IGNORE_SUFFIXES = {
+    ".d.ts", ".spec.ts", ".test.ts", ".spec.js", ".test.js", 
+    ".min.js", ".map", ".spec.tsx", ".test.tsx"
+}
+
 # 需要哪些“容器节点”作为 chunk 单位 只捕获“容器结点”，名字统一在代码里计算（避免 matches 的配对差异）
 QUERY_STR = r"""
 ; comments for doc
@@ -147,7 +160,6 @@ def stable_id(path: str, kind: str, name: str, start: int, end: int) -> str:
     return h[:12]
 
 # ---- name helpers (不依赖 matches 的配对关系) ----
-# 对于 function_declaration / class_declaration / method_definition / variable_declarator，统一用 field_name="name" 找名字
 def name_for_function_like(node: Node, src: bytes) -> Optional[str]:
     """function_declaration / class_declaration / method_definition / variable_declarator"""
     nm = node.child_by_field_name("name")
@@ -218,7 +230,6 @@ def chunk_file(repo_root: pathlib.Path, file_path: pathlib.Path) -> List[dict]:
             name = name_for_function_like(node, src)
 
         elif cap == "assign_stmt":          # assignment_expression left: _ ; right: (arrow|function)
-            # 名字来自 left
             left = node.child_by_field_name("left")
             right = node.child_by_field_name("right")
             if right is not None:
@@ -238,17 +249,15 @@ def chunk_file(repo_root: pathlib.Path, file_path: pathlib.Path) -> List[dict]:
             continue
 
         if not name:
-            # 某些匿名情况（如 export default function () {}），这里可以选择跳过或给占位名
-            # 为保证质量，Day2 先跳过匿名
             continue
-# 去重
+        
         start = target.start_point[0] + 1
         end   = target.end_point[0] + 1
         dedup_key = (name, start, kind)
         if dedup_key in seen_keys:
             continue
         seen_keys.add(dedup_key)
-# 组装
+        
         sig = extract_signature(target, src)
         doc = preceding_doc(target, src, comments)
         code_full = node_text(src, target)
@@ -267,22 +276,35 @@ def chunk_file(repo_root: pathlib.Path, file_path: pathlib.Path) -> List[dict]:
         }
         cid = stable_id(rel, kind, name, start, end)
         chunks.append({"id": cid, "text": text, "meta": meta})
-# 对单个 JS/TS 文件：用 tree-sitter 把所有函数/类/方法/变量函数抓出来
-# 对每个节点生成一个包含签名、注释、代码正文和丰富元数据的 chunk，输出为 {"id","text","meta"}
     return chunks
 
 def chunk_repo(repo_root: pathlib.Path, out_path: pathlib.Path) -> int:
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    skip_dirs = {"node_modules", "dist", "build", ".git"}
+    
     src_files = []
+    # 使用 rglob 遍历
     for p in repo_root.rglob("*"):
         if not p.is_file():
             continue
-        if any(part in skip_dirs for part in p.parts):
+        
+        # 1. 过滤忽略的目录 (使用 relative_to 确保匹配的是目录部分)
+        try:
+            rel_parts = p.relative_to(repo_root).parts
+        except ValueError:
+            rel_parts = p.parts # fallback
+            
+        if any(part in IGNORE_DIRS for part in rel_parts):
             continue
+            
+        # 2. 过滤忽略的后缀
+        if any(p.name.endswith(suf) for suf in IGNORE_SUFFIXES):
+            continue
+
         if p.suffix.lower() in SUPPORTED_EXTS:
             src_files.append(p)
+            
     print(f"Found {len(src_files)} source files under {repo_root}")
+    
     total = 0
     with out_path.open("w", encoding="utf-8") as f:
         for p in src_files:
