@@ -17,6 +17,7 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY:-dummy}
       # Redis 连接（缓存 / RQ 都用得到）
       - REDIS_URL=redis://redis:6379/0
+      - HF_ENDPOINT=https://hf-mirror.com
     volumes:
       # 挂载本地 data 目录，保证你的向量库持久化
       - ./data:/app/data
@@ -75,6 +76,7 @@ services:
       - LOCAL_LLM_BASE=${LOCAL_LLM_BASE:-http://llama:8080/v1}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-dummy}
       - REDIS_URL=redis://redis:6379/0
+      - HF_ENDPOINT=https://hf-mirror.com
     depends_on:
       - redis
       # 同样不强依赖 llama
