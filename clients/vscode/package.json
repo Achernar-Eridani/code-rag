@@ -2,7 +2,7 @@
   "name": "code-rag-assistant",
   "displayName": "Code RAG Agent",
   "description": "Your local AI coding assistant with AST-aware search & autonomous agent capabilities.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "myshkin451",
   "repository": {
     "type": "git",
