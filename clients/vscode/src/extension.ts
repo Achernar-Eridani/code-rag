@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import { ping, search, explain, agentExplain, friendlyError, SearchResponse } from "./api";
 import { SearchTreeProvider, registerSearchOpenCommand } from "./searchView";
 import { ExplainPanel } from "./explainPanel";
+import { buildAndUploadIndex } from "./indexer"; // 引用新模块
 
 let statusBarItem: vscode.StatusBarItem;
 
@@ -18,8 +19,7 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(treeView);
   registerSearchOpenCommand(context);
 
-  // 3. 核心改进：监听配置变化
-  // 当用户在设置里修改 rag.providerOverride 或 rag.apiKey 时，自动刷新状态栏
+  // 3. 监听配置变化
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration("rag")) {
@@ -28,7 +28,6 @@ export function activate(context: vscode.ExtensionContext) {
     })
   );
 
-  // 4. 启动时刷新一次 (不要 await，避免阻塞插件激活)
   refreshStatusBar();
 
   // --- Command: Search ---
@@ -39,14 +38,13 @@ export function activate(context: vscode.ExtensionContext) {
     if (!q) return;
 
     try {
-      statusBarItem.text = "$(sync~spin) RAG: searching..."; // 加个转圈图标
+      statusBarItem.text = "$(sync~spin) RAG: searching..."; 
       const res: SearchResponse = await search(q);
       tree.refresh(res.results || []);
       vscode.window.showInformationMessage(`Found ${res.total} results.`);
     } catch (e: any) {
       vscode.window.showErrorMessage(`Search failed: ${friendlyError(e)}`);
     } finally {
-      // 结束后恢复状态
       await refreshStatusBar();
     }
   }));
@@ -67,8 +65,9 @@ export function activate(context: vscode.ExtensionContext) {
     } finally {
       await refreshStatusBar();
     }
-  }))
-    // --- Command: Ask Code Agent ---
+  }));
+
+  // --- Command: Agent ---
   context.subscriptions.push(
     vscode.commands.registerCommand("rag.agentExplain", async () => {
       const editor = vscode.window.activeTextEditor;
@@ -77,7 +76,7 @@ export function activate(context: vscode.ExtensionContext) {
       const q = await vscode.window.showInputBox({
         title: "RAG Agent: Ask Code Agent",
         value: sel,
-        prompt: "Ask anything about this repo or your code. Agent will decide whether to search.",
+        prompt: "Ask anything about this repo. Agent will decide whether to search.",
       });
       if (!q) return;
 
@@ -92,17 +91,29 @@ export function activate(context: vscode.ExtensionContext) {
       }
     })
   );
+
+  // --- Command: Build Index (New) ---
+  context.subscriptions.push(
+      vscode.commands.registerCommand("rag.buildIndex", async () => {
+          try {
+              statusBarItem.text = "$(sync~spin) RAG: Indexing...";
+              await buildAndUploadIndex({ fresh: true });
+              vscode.window.showInformationMessage("Workspace Index Rebuilt Successfully!");
+          } catch (e: any) {
+              vscode.window.showErrorMessage(`Indexing failed: ${e.message}`);
+          } finally {
+              await refreshStatusBar();
+          }
+      })
+  );
 }
 
 export function deactivate() {}
 
-// 抽离出来的刷新逻辑
 async function refreshStatusBar() {
   try {
-    // 这里的 ping 内部会调用 buildHeaders() 读取最新配置
     const info = await ping();
     if (info.ok) {
-      // 显示 Provider 和 Model
       statusBarItem.text = `$(check) RAG: ${info.provider} · ${info.model}`;
       statusBarItem.tooltip = "Code RAG Service is Online";
     } else {

@@ -1,5 +1,7 @@
 import axios, { AxiosInstance } from "axios";
 import * as vscode from "vscode";
+import { getWorkspaceId } from "./indexer";
+
 
 // =============================================================================
 //  Types (原有的定义)
@@ -92,18 +94,20 @@ function buildHeaders(): Record<string, string> {
   const { providerOverride, apiKey } = getCfg();
   const headers: Record<string, string> = {};
 
-  // 如果配置了 providerOverride 且不是 auto，通过 Header 告诉后端
+  // 注入 workspace id：保证 search/explain/agent 都查同一个 collection
+  headers["x-workspace-id"] = getWorkspaceId();
+
   if (providerOverride && providerOverride !== "auto") {
     headers["x-llm-provider"] = providerOverride;
   }
 
-  // 如果配置了 API Key，通过 Header 透传
   if (apiKey && apiKey.trim() !== "") {
     headers["x-api-key"] = apiKey.trim();
   }
 
   return headers;
 }
+
 
 let client: AxiosInstance | null = null;
 

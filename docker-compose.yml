@@ -30,31 +30,31 @@ services:
       # - llama
 
   # 2. 本地 LLM 推理服务 (llama.cpp) —— 仅在 Windows + GPU 场景使用
-  llama:
-    image: ghcr.io/ggml-org/llama.cpp:server-cuda
-    container_name: coderag-llama
-    ports:
-      - "8081:8080" # 宿主机 8081 -> 容器 8080
-    environment:
-      - LLAMA_ARG_MODEL=/models/qwen2.5-coder-7b-instruct-q6_k.gguf
-      - LLAMA_ARG_CTX_SIZE=8192
-      - LLAMA_ARG_N_GPU_LAYERS=35
-    volumes:
-      - ./models:/models
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
+  # llama:
+  #   image: ghcr.io/ggml-org/llama.cpp:server-cuda
+  #   container_name: coderag-llama
+  #   ports:
+  #     - "8081:8080" # 宿主机 8081 -> 容器 8080
+  #   environment:
+  #     - LLAMA_ARG_MODEL=/models/qwen2.5-coder-7b-instruct-q6_k.gguf
+  #     - LLAMA_ARG_CTX_SIZE=8192
+  #     - LLAMA_ARG_N_GPU_LAYERS=35
+  #   volumes:
+  #     - ./models:/models
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - driver: nvidia
+  #             count: all
+  #             capabilities: [gpu]
 
   # 3. Redis（缓存 & RQ）
   redis:
     image: redis:7
     container_name: coderag-redis
     ports:
-      - "6379:6379"
+      - "6379:6P379"
 
   # 4. RQ Worker
   worker:

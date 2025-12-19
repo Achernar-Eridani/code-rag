@@ -74,7 +74,7 @@
         },
         "rag.symbolBoost": {
           "type": "number",
-          "default": 2.0,
+          "default": 2,
           "description": "Symbol priority boost for hybrid search."
         },
         "rag.providerOverride": {
@@ -129,6 +129,8 @@
     "package": "vsce package"
   },
   "devDependencies": {
+    "@types/form-data": "^2.2.1",
+    "@types/jszip": "^3.4.0",
     "@types/node": "^22.0.0",
     "@types/vscode": "^1.84.0",
     "esbuild": "^0.23.0",
@@ -136,6 +138,8 @@
     "vsce": "^2.15.0"
   },
   "dependencies": {
-    "axios": "^1.7.7"
+    "axios": "^1.13.2",
+    "form-data": "^4.0.5",
+    "jszip": "^3.10.1"
   }
 }

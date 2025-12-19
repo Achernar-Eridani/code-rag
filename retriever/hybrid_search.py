@@ -1,54 +1,42 @@
 # -*- coding: utf-8 -*-
 """
-Day 3（新版栈）：Hybrid 检索 v1（符号优先 + 向量召回 + ast_path 去重）
-- 不再手动生成查询向量，直接用 collection.query(query_texts=[...])
+混合检索器 (HybridSearcher) 
+- 封装 ChromaDB 的 query 调用
+- 实现 Hybrid 策略：Semantic Score + Symbol Boost
+- 支持动态 Collection 切换 (Workspace Isolation)
 """
-"""
-Hybrid 检索 v1
-- 支持 include_documents: True 时返回 text_full（给 /explain 用）
-- 默认 False，仅返回 text_preview（给 /search 用）
-"""
-
-import re
-from typing import Any, Dict, List
 
 import chromadb
 from chromadb.config import Settings
+from chromadb.utils import embedding_functions
+from typing import List, Dict, Any, Optional
+import os
 
-# 初始化一个 持久化 Chroma 客户端，指向向量库目录 ./data/chroma_db。 从里面拿到名为 "code_chunks" 的集合（就是 embed_ingest.py 写进去的那批 AST chunk）。
 class HybridSearcher:
-    def __init__(
-        self,
-        db_path: str = "./data/chroma_db",
-        collection_name: str = "code_chunks",
-    ):
+    def __init__(self, db_path: str = "data/chroma_db"):
         self.client = chromadb.PersistentClient(
-            path=db_path, settings=Settings(anonymized_telemetry=False)
+            path=db_path,
+            settings=Settings(anonymized_telemetry=False),
         )
-        self.col = self.client.get_collection(collection_name)
+        # 默认 Embedding (ONNX)
+        self.ef = embedding_functions.ONNXMiniLM_L6_V2()
+        
+        # 缓存 collection 对象，避免每次 get_collection
+        self._cols: Dict[str, chromadb.Collection] = {}
 
-# 疑似函数名/类名”提取出来，可以专门加权这些字段
-    @staticmethod
-    def _extract_symbols(q: str) -> List[str]:
-        backtick = re.findall(r"`([^`]+)`", q)
-        ident = re.findall(r"\b[a-zA-Z_][a-zA-Z0-9_]*\b", q)
-        seen, out = set(), []
-        for s in backtick + ident:
-            s2 = s.strip()
-            if s2 and s2 not in seen:
-                out.append(s2); seen.add(s2)
-        return out
+    def _get_col(self, name: str) -> Optional[chromadb.Collection]:
+        if name in self._cols:
+            return self._cols[name]
+        try:
+            # 尝试获取，如果不存在(没建索引)则返回 None，不要报错炸掉
+            col = self.client.get_collection(name, embedding_function=self.ef)
+            self._cols[name] = col
+            return col
+        except Exception as e:
+            # print once for debug (or use logger)
+            # print(f"[HybridSearcher] get_collection failed: {name} ({type(e).__name__}: {e})")
+            return None
 
-# 避免search重复函数定义 只保留分数最高结果
-    @staticmethod
-    def _dedup_by_ast_path(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        best = {}
-        for r in items:
-            m = r["metadata"] or {}
-            key = m.get("ast_path") or f"{m.get('path')}:{m.get('name')}"
-            if key not in best or r["score"] > best[key]["score"]:
-                best[key] = r
-        return list(best.values())
 
     def search(
         self,
@@ -56,90 +44,96 @@ class HybridSearcher:
         top_k: int = 10,
         symbol_boost: float = 2.0,
         include_documents: bool = False,
+        collection_name: str = "code_chunks"
     ) -> List[Dict[str, Any]]:
-        assert isinstance(query, str) and query.strip(), "query 不能为空"
+        """
+        混合检索入口
+        """
+        col = self._get_col(collection_name)
+        if not col:
+            # 集合不存在，直接返回空，不报错
+            return []
 
-        # 1) 向量召回（由集合的 embedding function 自动对 query 嵌入）
-        # 用 Embedding 模型把用户的 Query 变成向量，去数据库里捞出 top_k * 2 个最相似的代码块（Candidate Generation）
-        n_cand = min(top_k * 2, 100)
-        hits = self.col.query(
+        # 1. 向量检索
+        # query_texts 会自动被 embedding_function 向量化
+        results = col.query(
             query_texts=[query],
-            n_results=n_cand,
-            include=["metadatas", "documents", "distances"],
+            n_results=top_k * 2,  # 多取一点给重排序用
+            include=["metadatas", "documents", "distances"] if include_documents else ["metadatas", "distances"]
         )
 
-        ids = hits.get("ids", [[]])[0]
-        metas = hits.get("metadatas", [[]])[0]
-        docs = hits.get("documents", [[]])[0]
-        dists = hits.get("distances", [[]])[0]
-
-        symbols = [s.lower() for s in self._extract_symbols(query)]
-
-        results: List[Dict[str, Any]] = []
-        for i in range(len(ids)):
-            meta = metas[i] or {}
-            doc = docs[i] or ""
-            dist = float(dists[i]) if dists else 0.0
-
-            base_score = 1.0 / (1.0 + dist)
-
-            # 2) 轻量符号加权：name 精确=1.0 / 包含=0.5；doc 出现=0.1
-            # 用正则 (re) 从 Query 里提取出像代码符号的单词（比如 CamelCase 或 snake_case）。拿着这些符号去匹配检索结果的 metadata['name']。
-            sym_score = 0.0
-            name = (meta.get("name") or "").lower()
-            dlow = doc.lower()
-            for s in symbols:
-                if name == s:
-                    sym_score += 1.0
-                elif s in name:
-                    sym_score += 0.5
-                elif s in dlow:
-                    sym_score += 0.1
-
-            final = base_score + symbol_boost * sym_score
-
-            item = {
-                "id": ids[i],
-                "score": final,
-                "base_score": base_score,
-                "symbol_score": sym_score,
-                "metadata": meta,
-                "text_preview": doc[:200],
-                "distance": dist,
-            }
-            if include_documents:
-                item["text_full"] = doc
-            results.append(item)
-
-        # 3) 按 ast_path 去重 + 排序 + 截断
-        results = self._dedup_by_ast_path(results)
-        results.sort(key=lambda x: x["score"], reverse=True)
-        return results[:top_k]
-    
-# 被 /search/{symbol} 接口使用 vscode插件预留
-    def search_by_symbol(self, symbol: str, top_k: int = 10) -> List[Dict[str, Any]]:
-        sym = symbol.strip()
-        if not sym:
+        if not results["ids"] or not results["ids"][0]:
             return []
-        rows = self.col.get(where={"name": sym}, limit=top_k, include=["metadatas", "documents"])
+
+        # 2. 结果展开 & 初始打分
+        # Chroma distance 是 欧氏距离? 余弦距离? 默认 L2 (squared Euclidean) -> distance越小越好
+        # 转换 score = 1 / (1 + distance) 或者 1 - distance (如果 cosine)
+        # 这里假设 distance 是 L2，范围 [0, +inf)
+        ids = results["ids"][0]
+        dists = results["distances"][0]
+        metas = results["metadatas"][0]
+        docs = results["documents"][0] if include_documents else [None] * len(ids)
+
+        candidates = []
+        for i, cid in enumerate(ids):
+            dist = dists[i]
+            meta = metas[i] or {}
+            doc_text = docs[i]
+            
+            # 基础分
+            base_score = 1.0 / (1.0 + dist)
+            
+            candidates.append({
+                "id": cid,
+                "score": base_score,
+                "metadata": meta,
+                "text_full": doc_text,
+                "text_preview": (doc_text or "")[:80].replace("\n", " ")
+            })
+
+        # 3. 符号/路径 增强 (Re-rank)
+        # 简单策略：如果 query 包含 meta['name']，加分
+        q_lower = query.lower()
+        
+        final_list = []
+        for cand in candidates:
+            m = cand["metadata"]
+            name = str(m.get("name", "")).lower()
+            ast_path = str(m.get("ast_path", "")).lower()
+            
+            boost = 1.0
+            # A. 精确匹配函数名
+            if name and name in q_lower:
+                 boost *= symbol_boost
+            
+            # B. 路径关键匹配 (可选)
+            # if "controller" in q_lower and "controller" in ast_path:
+            #     boost *= 1.2
+            
+            cand["score"] *= boost
+            final_list.append(cand)
+
+        # 4. 排序 & 截断
+        final_list.sort(key=lambda x: x["score"], reverse=True)
+        return final_list[:top_k]
+
+    # 最小：先尝试精确，再尝试大小写不敏感（用 query 退化）
+    def search_by_symbol(self, symbol: str, top_k: int = 10, collection_name: str = "code_chunks"):
+        col = self._get_col(collection_name)
+        if not col:
+            return []
+
+        # 1) try exact where
+        try:
+            results = col.get(where={"name": symbol}, limit=top_k, include=["metadatas", "documents"])
+        except Exception:
+            results = {"ids": [], "metadatas": [], "documents": []}
+
         out = []
-        for i in range(len(rows["ids"])):
-            out.append(
-                {
-                    "id": rows["ids"][i],
-                    "metadata": rows["metadatas"][i],
-                    "text_preview": (rows["documents"][i] or "")[:200],
-                }
-            )
-        return out
+        if results.get("ids"):
+            for i, cid in enumerate(results["ids"]):
+                out.append({"id": cid, "metadata": results["metadatas"][i], "text_full": results["documents"][i], "score": 1.0})
+            return out
 
-
-if __name__ == "__main__":
-    hs = HybridSearcher()
-    for q in ["asciiToArray", "Parser", "get_language", "build ast path", "chunk function"]:
-        print("=" * 60, "\nQuery:", q)
-        rs = hs.search(q, top_k=3, include_documents=False)
-        for j, r in enumerate(rs, 1):
-            m = r["metadata"]
-            print(f"[{j}] score={r['score']:.3f} (base={r['base_score']:.3f}, sym={r['symbol_score']:.3f})")
-            print(f"    {m.get('kind')} {m.get('name')}  @ {m.get('path')}  L{m.get('start_line')}-{m.get('end_line')}")
+        # 2) fallback: vector query by symbol text
+        return self.search(symbol, top_k=top_k, include_documents=True, collection_name=collection_name)

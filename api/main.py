@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
@@ -9,6 +9,8 @@ import re, unicodedata
 from fastapi.responses import StreamingResponse
 
 from rq.job import Job
+
+import shutil
 
 # 项目内模块
 ROOT = pathlib.Path(__file__).parent.parent
@@ -21,20 +23,18 @@ from api.cache import (
     set_cached_search_response,
     get_redis,
 )
-from indexer.tasks import enqueue_rebuild_embeddings
+from indexer.tasks import enqueue_rebuild_embeddings, enqueue_indexing_job
 from ai.agent import run_code_agent
 
-# =============================================================================
-#  New: Imports for Context & LLM Configuration (Backend Step 3)
-# =============================================================================
+# Imports for Context & LLM Configuration
 from api.deps import RequestContext, get_request_context
 from ai.llm import get_client_for_request, resolve_llm_config
 
 load_dotenv()
 
 # ------- 文本清洗 & token 估算 -------
-_SURR_RE = re.compile(r"[\ud800-\udfff]")  # 代理区
-_CTRL_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F]")  # 控制符
+_SURR_RE = re.compile(r"[\ud800-\udfff]")
+_CTRL_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F]")
 
 def sanitize(text: str) -> str:
     if not isinstance(text, str):
@@ -48,20 +48,16 @@ def sanitize(text: str) -> str:
     return text
 
 def _estimate_tokens(s: str) -> int:
-    """粗略估算：~4 字符 ≈ 1 token"""
     if not isinstance(s, str):
         return 0
     return max(1, math.ceil(len(s) / 4))
 
 # ------- app & 搜索器 单例 -------
-app = FastAPI(title="Code-RAG MVP", version="0.6.0")
+app = FastAPI(title="Code-RAG MVP", version="0.7.0")
 
-# =============================================================================
-#  New: CORS Middleware (Optional but recommended for VS Code Webview dev)
-# =============================================================================
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 生产环境建议收紧
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -75,11 +71,50 @@ def get_searcher() -> HybridSearcher:
         _searcher = HybridSearcher()
     return _searcher
 
+# =============================================================================
+#  Helper: Collection Name Resolution
+# =============================================================================
+def get_collection_name(workspace_id: Optional[str]) -> str:
+    raw = (workspace_id or "").strip()
+    if not raw or raw == "default":
+        return "code_chunks"
+    safe_id = re.sub(r"[^a-zA-Z0-9_-]", "_", raw)[:64] or "default"
+    return "code_chunks" if safe_id == "default" else f"code_chunks__{safe_id}"
+
+
 
 # =============================================================================
-#  Modified: /ping (Using RequestContext)
+#  New: Upload & Build Index API
 # =============================================================================
+@app.post("/index/upload_and_build")
+async def upload_and_build_index(
+    file: UploadFile = File(...),
+    workspace_id: str = Form(...),
+    fresh: bool = Form(True)
+):
+    safe_id = re.sub(r"[^a-zA-Z0-9_-]", "_", (workspace_id or "").strip())[:64] or "default"
+    upload_dir = pathlib.Path("data/workspaces") / safe_id
+    upload_dir.mkdir(parents=True, exist_ok=True)
 
+    zip_path = upload_dir / "upload.zip"
+
+    try:
+        with open(zip_path, "wb") as f:
+            shutil.copyfileobj(file.file, f)   
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"File upload failed: {e}")
+
+    job_id = enqueue_indexing_job(
+        workspace_id=safe_id,                
+        zip_path=str(zip_path),
+        fresh=fresh,
+    )
+    return {"job_id": job_id, "message": "Upload successful, indexing started."}
+
+
+# =============================================================================
+#  Modified: /ping
+# =============================================================================
 class PingResponse(BaseModel):
     ok: bool
     provider: str
@@ -87,17 +122,10 @@ class PingResponse(BaseModel):
 
 @app.get("/ping", response_model=PingResponse)
 async def ping(ctx: RequestContext = Depends(get_request_context)):
-    """
-    用于 VS Code 状态栏：显示当前这次请求会用哪个 provider / model。
-    支持通过 x-llm-provider / x-api-key 动态切换。
-    """
     cfg = resolve_llm_config(ctx)
-    
-    # 如果是 local 模式，尝试探测真实 ID (可选优化)
     real_model_id = cfg.model
     if cfg.provider == "local" and cfg.base_url:
         try:
-            # 简单探测一下本地服务是否活着
             import requests
             r = requests.get(f"{cfg.base_url}/models", timeout=1)
             if r.ok:
@@ -105,17 +133,13 @@ async def ping(ctx: RequestContext = Depends(get_request_context)):
                 if isinstance(data, dict) and isinstance(data.get("data"), list) and data["data"]:
                     real_model_id = data["data"][0].get("id") or cfg.model
         except Exception:
-            pass  # 探测失败不影响返回配置值
-
-    return PingResponse(
-        ok=True,
-        provider=cfg.provider,
-        model=real_model_id,
-    )
+            pass
+    return PingResponse(ok=True, provider=cfg.provider, model=real_model_id)
 
 
-# ===== /search (No changes needed for Context, using Payload Cache) =====
-
+# =============================================================================
+#  Modified: /search (Workspace Support)
+# =============================================================================
 class SearchRequest(BaseModel):
     query: str = Field(..., min_length=1)
     top_k: int = 10
@@ -140,20 +164,28 @@ class SearchResponse(BaseModel):
     results: List[SearchResult]
 
 @app.post("/search", response_model=SearchResponse)
-def search(req: SearchRequest):
-    # 1) 缓存检查
+def search(
+    req: SearchRequest,
+    x_workspace_id: Optional[str] = Header(None)
+):
+    # 1) Collection Name
+    col_name = get_collection_name(x_workspace_id)
+
+    # 2) 缓存 Key 增加 workspace_id
     payload = req.model_dump()
+    payload["_ws"] = col_name # 混入 workspace 信息
     cached = get_cached_search_response(SearchResponse, payload)
     if cached is not None:
         return cached
 
-    # 2) 检索
+    # 3) 检索
     hs = get_searcher()
     rs = hs.search(
         req.query,
         top_k=req.top_k,
         symbol_boost=req.symbol_boost,
         include_documents=False,
+        collection_name=col_name # Pass collection name
     )
 
     out: List[SearchResult] = []
@@ -172,7 +204,7 @@ def search(req: SearchRequest):
             )
         )
 
-    # 3) 过滤
+    # 4) 过滤
     if req.path_prefix:
         pref = req.path_prefix.replace("\\", "/")
         out = [x for x in out if x.path.replace("\\", "/").startswith(pref)]
@@ -183,19 +215,26 @@ def search(req: SearchRequest):
 
     resp = SearchResponse(query=req.query, total=len(out), results=out)
 
-    # 4) 写入缓存
+    # 5) 写入缓存
     set_cached_search_response(payload, resp, ttl_seconds=3600)
     return resp
 
 @app.get("/search/{symbol}")
-def search_symbol(symbol: str, top_k: int = 10):
+def search_symbol(
+    symbol: str, 
+    top_k: int = 10,
+    x_workspace_id: Optional[str] = Header(None)
+):
+    col_name = get_collection_name(x_workspace_id)
     hs = get_searcher()
-    rows = hs.search_by_symbol(symbol, top_k=top_k)
+    # Assume search_by_symbol also updated
+    rows = hs.search_by_symbol(symbol, top_k=top_k, collection_name=col_name)
     return {"symbol": symbol, "total": len(rows), "results": rows}
 
 
-# ===== /explain Utils =====
-
+# =============================================================================
+#  Modified: /explain (Workspace Support)
+# =============================================================================
 class ExplainRequest(BaseModel):
     query: str = Field(..., min_length=1)
     top_k: int = 6
@@ -204,7 +243,6 @@ class ExplainRequest(BaseModel):
     max_chunk_chars: int = 1200
     temperature: float = 0.2
     max_tokens: int = 700
-    # model/provider 字段保留用于兼容 API Body 传参，但现在 Header 优先级更高
 
 class Evidence(BaseModel):
     id: str
@@ -264,21 +302,19 @@ def build_fallback_answer(query: str, results: List[dict], max_items: int = 6) -
     lines.append("Note: To obtain natural language interpretation, please configure RAG_LLM_PROVIDER.")
     return "\n".join(lines)
 
-
-# =============================================================================
-#  Modified: /explain (Inject Client from Context)
-# =============================================================================
-
 @app.post("/explain", response_model=ExplainResponse)
 async def explain(
     req: ExplainRequest,
     ctx: RequestContext = Depends(get_request_context),
+    x_workspace_id: Optional[str] = Header(None)
 ):
-    # 1) 检索
+    col_name = get_collection_name(x_workspace_id)
+    
     t0 = time.perf_counter()
     hs = get_searcher()
     results = hs.search(
-        req.query, top_k=req.top_k, symbol_boost=req.symbol_boost, include_documents=True
+        req.query, top_k=req.top_k, symbol_boost=req.symbol_boost, 
+        include_documents=True, collection_name=col_name
     )
     t1 = time.perf_counter()
 
@@ -294,17 +330,14 @@ async def explain(
             usage=None,
         )
 
-    # 2) 构建上下文
     ctx_text = build_context_blocks(results, req.max_ctx_chars, req.max_chunk_chars)
     user_prompt = sanitize(
         textwrap.dedent(
             f"""
             问题：
             {req.query}
-
             可用证据（按编号引用）：
             {ctx_text}
-
             要求：
             - 优先结合证据中的函数名/注释/实现细节
             - 对"如何实现/如何使用"类问题，给出简要步骤或伪代码
@@ -313,12 +346,9 @@ async def explain(
         ).strip()
     )
 
-    # 3) LLM 调用 (使用 get_client_for_request 获取配置好的 Client)
     client, cfg = get_client_for_request(ctx)
-    
     t2 = time.perf_counter()
     try:
-        # 统一使用 OpenAI SDK 风格调用（ai.llm 保证了 local 模式也返回兼容的 client）
         resp = client.chat.completions.create(
             model=cfg.model,
             messages=[
@@ -331,8 +361,6 @@ async def explain(
         t3 = time.perf_counter()
         
         text = (resp.choices[0].message.content or "").strip()
-        
-        # 处理 Usage
         u = getattr(resp, "usage", None)
         usage = {
             "prompt_tokens": getattr(u, "prompt_tokens", 0),
@@ -341,13 +369,11 @@ async def explain(
             "model": cfg.model,
             "provider": cfg.provider,
         }
-        # 如果是 Local 模式且没返回 token 数，做个估算
         if usage["total_tokens"] == 0:
              pt = _estimate_tokens(ctx_text)
              ct = _estimate_tokens(text)
              usage = {**usage, "prompt_tokens": pt, "completion_tokens": ct, "total_tokens": pt+ct, "estimated": True}
 
-        # 构造 Evidence 列表
         evs = [
             Evidence(
                 id=r["id"],
@@ -374,7 +400,6 @@ async def explain(
         )
 
     except Exception:
-        # 降级处理
         t3 = time.perf_counter()
         fallback = build_fallback_answer(req.query, results)
         evs = [
@@ -403,19 +428,21 @@ async def explain(
 
 
 # =============================================================================
-#  Modified: /explain_stream (Inject Client from Context)
+#  Modified: /explain_stream (Workspace Support)
 # =============================================================================
-
 @app.post("/explain_stream")
 async def explain_stream(
     req: ExplainRequest,
     ctx: RequestContext = Depends(get_request_context),
+    x_workspace_id: Optional[str] = Header(None)
 ):
-    # 1. 检索
+    col_name = get_collection_name(x_workspace_id)
+
     t0 = time.perf_counter()
     hs = get_searcher()
     results = hs.search(
-        req.query, top_k=req.top_k, symbol_boost=req.symbol_boost, include_documents=True,
+        req.query, top_k=req.top_k, symbol_boost=req.symbol_boost, 
+        include_documents=True, collection_name=col_name
     )
     t1 = time.perf_counter()
 
@@ -425,7 +452,6 @@ async def explain_stream(
             yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
         return StreamingResponse(no_result(), media_type="text/event-stream")
 
-    # 2. 构建上下文
     ctx_text = build_context_blocks(results, req.max_ctx_chars, req.max_chunk_chars)
     user_prompt = sanitize(
         textwrap.dedent(
@@ -442,12 +468,9 @@ async def explain_stream(
         ).strip()
     )
 
-    # 获取配置
     client, cfg = get_client_for_request(ctx)
 
-    # 3. 生成器
     def event_stream():
-        # A) 发送 Meta
         head = {
             "type": "meta",
             "query": req.query,
@@ -461,8 +484,6 @@ async def explain_stream(
         t2 = time.perf_counter()
         full_text = ""
         try:
-            # B) 调用 LLM (阻塞式获取全部，然后模拟流式吐出)
-            # 注：如果你想做真流式，可以在 create 里加 stream=True，然后迭代 response
             resp = client.chat.completions.create(
                 model=cfg.model,
                 messages=[
@@ -475,7 +496,6 @@ async def explain_stream(
             full_text = (resp.choices[0].message.content or "").strip()
             t3 = time.perf_counter()
 
-            # C) 模拟流式推送
             chunk_size = 20
             for i in range(0, len(full_text), chunk_size):
                 chunk = full_text[i : i + chunk_size]
@@ -483,7 +503,6 @@ async def explain_stream(
                     payload = {"type": "chunk", "text": chunk}
                     yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
-            # D) Usage
             u = getattr(resp, "usage", None)
             usage = {
                 "prompt_tokens": getattr(u, "prompt_tokens", 0),
@@ -522,8 +541,9 @@ async def explain_stream(
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
-# ===== /index/rebuild & /index/status (Unchanged) =====
-
+# =============================================================================
+#  Unchanged: /index/rebuild & /index/status
+# =============================================================================
 class IndexRebuildRequest(BaseModel):
     chunks: str = "data/chunks_day2.jsonl"
     db: str = "data/chroma_db"
@@ -565,25 +585,10 @@ def index_status(job_id: str):
     )
 
 
-# ===== Agent Section =====
-
-def agent_search_adapter(query: str, top_k: int = 6) -> List[Dict[str, Any]]:
-    searcher = get_searcher()
-    results = searcher.search(query=query, top_k=top_k, include_documents=True)
-    simplified: List[Dict[str, Any]] = []
-    for r in results:
-        meta = r.get("metadata", {})
-        simplified.append({
-            "path": meta.get("path"),
-            "symbol": meta.get("name"),
-            "kind": meta.get("kind"),
-            "start_line": meta.get("start_line"),
-            "end_line": meta.get("end_line"),
-            "score": r.get("score"),
-            "code": (r.get("text_full") or r.get("text_preview") or "")
-        })
-    return simplified
-
+# =============================================================================
+#  Modified: Agent (Agent doesn't natively support WS isolation yet,
+#  but you can update agent_search_adapter to take a collection name later)
+# =============================================================================
 class AgentExplainRequest(BaseModel):
     query: str
     max_tokens: int = 512
@@ -595,17 +600,44 @@ class AgentExplainResponse(BaseModel):
     tool_input: Optional[Dict[str, Any]] = None
     tool_results: Optional[List[Dict[str, Any]]] = None
 
+# 暂时简单处理：Agent 仍查 code_chunks (default)，如果想支持 agent 查特定库，
+# 需要修改 run_code_agent 让它接收 collection 参数并透传给 search_func。
+# 这里演示如何让 search_func 闭包捕获 collection_name。
+def create_agent_search_adapter(col_name: str):
+    def adapter(query: str, top_k: int = 6) -> List[Dict[str, Any]]:
+        searcher = get_searcher()
+        results = searcher.search(
+            query=query, top_k=top_k, include_documents=True, 
+            collection_name=col_name
+        )
+        simplified: List[Dict[str, Any]] = []
+        for r in results:
+            meta = r.get("metadata", {})
+            simplified.append({
+                "path": meta.get("path"),
+                "symbol": meta.get("name"),
+                "kind": meta.get("kind"),
+                "start_line": meta.get("start_line"),
+                "end_line": meta.get("end_line"),
+                "score": r.get("score"),
+                "code": (r.get("text_full") or r.get("text_preview") or "")
+            })
+        return simplified
+    return adapter
+
 @app.post("/agent/explain", response_model=AgentExplainResponse)
 def agent_explain(
     req: AgentExplainRequest,
-    ctx: RequestContext = Depends(get_request_context) # Added dependency
-) -> AgentExplainResponse:
-    # TODO: Pass 'ctx' or 'cfg' to run_code_agent to support dynamic provider switching for agents.
-    # Currently it uses default env vars inside run_code_agent.
+    ctx: RequestContext = Depends(get_request_context),
+    x_workspace_id: Optional[str] = Header(None)
+):
+    col_name = get_collection_name(x_workspace_id)
+    search_adapter = create_agent_search_adapter(col_name)
+
     try:
         answer, debug = run_code_agent(
             user_query=req.query,
-            search_func=agent_search_adapter,
+            search_func=search_adapter,
             max_tokens=req.max_tokens,
         )
     except Exception as e:
