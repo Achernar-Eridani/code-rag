@@ -54,7 +54,7 @@ services:
     image: redis:7
     container_name: coderag-redis
     ports:
-      - "6379:6P379"
+      - "6379:6379"
 
   # 4. RQ Worker
   worker:
